@@ -1,0 +1,97 @@
+# Ravenswood Family Medicine phone playbook.
+#
+# The clinic's rules, written down. The agent reads this; it doesn't invent its
+# own. Owner: Michelle (practice manager). Red flags and the never-list also need
+# sign-off from the physicians.
+#
+# Choices marked PROPOSED are Claude's recommendations for D16-D19, accepted
+# when Meghna said "do everything". Revisit any of them in DECISIONS.md.
+
+customer: Ravenswood Family Medicine
+timezone: America/Chicago
+workflows: [red_flags, identity, scheduling, handoff]
+
+# Played by code, word for word, so it can never be skipped (Illinois consent).
+disclosure: >-
+  Thanks for calling Ravenswood Family Medicine. I'm an AI assistant, and this
+  call is recorded. If this is a medical emergency, please hang up and call
+  911. How can I help you today?
+
+office_hours: "Monday to Friday, 8am to 5pm"
+office_phone: "(773) 555-0100"
+confirmation_sms: true
+
+# --- Red flags: before anything else, no identity check, no questions ---------
+red_flags:
+  staff_alert_phone: "+17735550190"   # front desk lead's phone
+  flags:
+    - id: emergency_symptoms
+      description: >-
+        Chest pain or pressure, trouble breathing, signs of stroke (face drooping,
+        arm or leg weakness, slurred speech, sudden confusion), severe bleeding,
+        fainting or someone unresponsive, or a severe allergic reaction.
+      say: "This needs emergency care. Please hang up and call 911 right now."
+      then: end_call
+      alert_queue: nurse
+    - id: suicidal_thoughts          # PROPOSED (D18): stay on the line
+      description: >-
+        The caller mentions suicide, wanting to die, or harming themselves.
+      say: >-
+        I'm really glad you called. You can reach the 988 Suicide and Crisis
+        Lifeline any time by calling or texting 988. I'm getting someone from our
+        staff for you right now. Please stay on the line with me.
+      then: stay_on_line
+      alert_queue: nurse
+
+# --- Identity: HIPAA, before any patient details --------------------------------
+identity:
+  max_attempts: 2
+  caregivers: on_file_only           # PROPOSED (D19): only authorized representatives on file
+  phone_first: true                  # D23: digits transcribe better than street names
+  read_back: true                    # D23: spell names back before checking (Damen vs "Tamen")
+
+# --- Scheduling (PROPOSED D17: v1 handles these end to end) -------------------
+scheduling:
+  search_days: 14
+  max_options: 3
+  waitlist_backfill: true            # cancelled slots are offered to the waitlist
+  visit_types:
+    - id: same_day_sick
+      description: New symptoms the patient wants seen soon (sore throat, fever, rash). Never emergencies.
+    - id: follow_up
+      description: Follow-up on an existing condition or a recent visit.
+    - id: annual_physical
+      description: Yearly physical or wellness visit.
+
+# --- Handoffs: everything else goes to people, with a clean summary -----------
+handoff:
+  queues:
+    - id: nurse
+      handles: Symptoms the patient wants advice on, clinical questions, refill requests, test results.
+      callback_promise: >-
+        I've passed this to our nurse, who will call you back today. If you
+        haven't heard from us by 4pm, please call the office.
+    - id: front_desk
+      handles: >-
+        New patients, insurance, forms, caregivers who aren't on file, anything
+        you couldn't verify or complete, and anyone asking for a person.
+      callback_promise: >-
+        I've passed this to our front desk, who will call you back during office
+        hours.
+    - id: billing
+      handles: Bills, payments, charges.
+      callback_promise: Our billing team will call you back within two business days.
+    - id: records
+      handles: Medical records requests and forms.
+      callback_promise: Our records team will follow up within two business days.
+
+never:
+  - Give medical advice, say whether a symptom is serious or not, or suggest any medication or dose.
+  - Interpret test results or say whether results are normal.
+  - Share or confirm any patient or appointment details before identity is verified.
+  - Say an appointment is booked, moved, or cancelled unless the system confirmed it.
+  - Approve, promise, or estimate timing for a prescription refill.
+
+human_request: >-
+  Offer a callback from the front desk with create_handoff. If they describe a
+  red flag, follow the red flag instructions instead.

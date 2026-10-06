@@ -1,0 +1,154 @@
+# Maple Court after-hours playbook.
+#
+# This file is the client's rulebook. The agent reads it; it does not invent
+# its own rules. Changing what counts as an emergency means editing this file,
+# not the code. Owner: Dana Okafor (property manager).
+#
+# Levels marked PROPOSED are Claude's suggestions for decision D4 and still need
+# Meghna's sign-off. See DECISIONS.md.
+
+customer: Maple Court Apartments
+timezone: America/Chicago
+workflows: [triage]
+
+# Said by code, word for word, at the start of every call. The model never
+# writes this line, so it can't be skipped (Illinois all-party consent).
+disclosure: >-
+  Hi, you've reached the after-hours maintenance line for Maple Court
+  Apartments. I'm an AI assistant, and this call is recorded. What's going on?
+
+office_hours: "Monday to Friday, 9am to 5pm"
+office_phone: "(312) 555-0100"
+
+# Text the caller a dated confirmation after every report. The RLTO clock
+# starts at notice, so both sides get a written record.
+confirmation_sms: true
+
+triage:
+  # Chicago Heat Ordinance: heat is required Sept 15 to June 1.
+  heating_season: {start: "09-15", end: "06-01"}
+
+  levels:
+    emergency:
+      action: page_oncall
+      tell_caller: >-
+        The on-call technician has been paged and will call you back shortly.
+    urgent:
+      action: ticket_high
+      tell_caller: >-
+        A technician will follow up first thing in the morning, when the office
+        opens at 9.
+    routine:
+      action: ticket_normal
+      tell_caller: >-
+        I've logged it, and the office will schedule a visit during business hours.
+    redirect:
+      action: note_for_manager
+      tell_caller: >-
+        That isn't something maintenance handles, but I've passed a note to the
+        property manager, and the office can help during business hours.
+
+  categories:
+    # --- Safety first: the agent says these lines before asking anything else ---
+    - id: gas_smell
+      description: Caller smells gas or suspects a gas leak.
+      level: emergency
+      safety_first: >-
+        Please leave the building right now, and you can hang up as you go. Don't
+        use light switches or anything electrical on the way out. Once you're
+        outside, call Peoples Gas at 866-556-6002 and 911. I'll alert the on-call
+        technician.
+    - id: fire_smoke_co
+      description: Fire, smoke, or a smoke or carbon monoxide alarm going off.
+      level: emergency
+      safety_first: >-
+        If there's fire, smoke, or a carbon monoxide alarm, please get out of the
+        building and call 911 first.
+    - id: electrical_hazard
+      description: Sparking, burning smell from an outlet or panel, exposed live wires.
+      level: emergency
+      safety_first: >-
+        Please stay away from it and don't touch it. If you see smoke or flames,
+        leave and call 911.
+
+    # --- Clear emergencies ---
+    - id: active_flooding
+      description: Water spreading across the floor, coming through the ceiling, or a burst pipe.
+      level: emergency
+      guidance: >-
+        If it's safe, turn off the shutoff valve under the kitchen sink.
+    - id: no_heat
+      description: Heat is out or the unit is cold (radiators not working).
+      level: emergency            # PROPOSED (D4 #1): emergency even with a space heater
+      seasonal: heating           # outside heating season this becomes routine
+      building_wide: true         # one boiler: page once, not once per caller
+    - id: sewage_backup
+      description: Sewage or wastewater coming up from a drain or toilet.
+      level: emergency
+    - id: no_running_water
+      description: No water at all from any tap.
+      level: emergency
+      building_wide: true
+    - id: entry_not_secure
+      description: Unit entry door or the building front door won't lock or close.
+      level: emergency            # PROPOSED (D4 #8): security for the tenant or all 48 units
+
+    # --- Gray zone ---
+    - id: no_hot_water
+      description: Cold water works but no hot water.
+      level: urgent               # PROPOSED (D4 #2): essential service, not dangerous overnight
+      building_wide: true
+    - id: leak_contained
+      description: A slow leak or drip that is contained (bucket, under a sink), not spreading.
+      level: urgent               # PROPOSED (D4 #3): spreading water is active_flooding instead
+      guidance: >-
+        Put a bucket or towels under it. The shutoff valve under the kitchen sink
+        will stop it if it gets worse.
+    - id: only_toilet_clogged
+      description: The unit's only toilet is clogged but not overflowing.
+      level: urgent               # PROPOSED (D4 #4)
+    - id: appliance_failure
+      description: Fridge, stove, or oven stopped working.
+      level: urgent               # PROPOSED (D4 #5)
+    - id: power_out_unit
+      description: Power is out in the unit only, after checking the breaker.
+      level: urgent               # PROPOSED (D4 #6)
+      guidance: >-
+        Check the breaker panel by the front door and flip any switch that's in
+        the middle position fully off, then on.
+    - id: lockout
+      description: Tenant is locked out of their unit.
+      level: routine              # PROPOSED (D4 #7): lease says lockouts are the tenant's cost (assumption A7)
+      guidance: >-
+        Maintenance can't let you in after hours. A licensed locksmith can, at
+        your own cost.
+    - id: window_not_secure
+      description: A window won't close or lock.
+      level: urgent               # PROPOSED (D4 #8)
+
+    # --- Routine ---
+    - id: minor_repair
+      description: Dripping faucet, running toilet, light out, broken cabinet, noisy appliance, and similar.
+      level: routine
+    - id: pests
+      description: Pest sighting (mice, roaches, bed bugs).
+      level: routine
+
+    # --- Not maintenance ---
+    - id: not_maintenance
+      description: Noise complaints, neighbor disputes, rent, leasing, parking.
+      level: redirect
+
+# The agent must never do these. Enforced in the prompt, checked in evals.
+never:
+  - Promise a specific arrival time.
+  - Give repair cost estimates.
+  - Tell a caller to fix anything involving gas lines or electrical wiring.
+  - Say a technician has been paged unless the system confirmed it.
+  - Argue with a caller about whether their problem is serious.
+
+# If someone keeps asking for a person, this is what happens.
+human_request: >-
+  Explain that the on-call technician is paged only for emergencies, and that
+  the property manager will see a note first thing in the morning. If the caller
+  describes something that is an emergency, treat it as one.

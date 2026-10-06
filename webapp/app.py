@@ -1,0 +1,330 @@
+"""Web app: see the customers, try calls, watch the staff side, read eval runs.
+
+Run locally:  .venv/bin/uvicorn webapp.app:app --port 8770
+Open:         http://localhost:8770
+
+Two modes:
+  local (default)  - for the owner: one shared copy of each customer's systems,
+                     live calls open, today's API spend shown in the header.
+  public           - PUBLIC_MODE=1, for a hosted demo: every visitor gets their
+                     own private copy of each customer's systems, live calls
+                     need an invite code (INVITE_CODES), spend is hidden, and
+                     per-visitor limits apply. Browsing everything else is free.
+"""
+
+import json
+import os
+import re
+import sys
+import time
+import uuid
+from collections import OrderedDict
+from datetime import date, datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import anthropic
+import yaml
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from core import budget, llm
+from core.agent import CallSession
+from core.notifier import Notifier
+from customers import CUSTOMERS
+from evals.run import RUNS, load_customer
+
+HERE = Path(__file__).parent
+LIVE = RUNS / "live"
+# Eval runs stay private in runs/. Copy a run folder into showcase/ to publish it.
+SHOWCASE = HERE.parent / "showcase"
+
+PUBLIC = os.environ.get("PUBLIC_MODE") == "1"
+INVITE_CODES = {c.strip() for c in os.environ.get("INVITE_CODES", "").split(",") if c.strip()}
+MAX_TURNS_PER_CALL = 20
+MAX_CALLS_PER_VISITOR_PER_DAY = 8
+MAX_SANDBOXES = 300
+SANDBOX_IDLE_SECONDS = 2 * 60 * 60
+
+app = FastAPI(title="Voice agent deployments")
+app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+
+
+class Live:
+    """One copy of a customer's systems: adapter, a movable clock, a text outbox."""
+
+    def __init__(self, cid: str, owner: str):
+        self.cid, self.owner = cid, owner
+        self.customer = load_customer(cid)
+        self.tz = ZoneInfo(self.customer.PLAYBOOK.timezone)
+        self.outbox = LIVE / owner / f"{cid}.outbox.jsonl"
+        self.used = time.time()
+        self.reset()
+
+    def reset(self):
+        self.clock = [datetime.now(self.tz)]
+        self.adapter = self.customer.make_adapter(lambda: self.clock[0])
+        self.outbox.parent.mkdir(parents=True, exist_ok=True)
+        self.outbox.write_text("")
+
+    def discard(self):
+        self.outbox.unlink(missing_ok=True)
+
+
+# One read-only copy per customer for page metadata, plus a copy per visitor.
+TEMPLATES = {cid: Live(cid, "_template") for cid in CUSTOMERS}
+SANDBOXES: "OrderedDict[tuple[str, str], Live]" = OrderedDict()
+CALLS: dict[str, tuple[str, str, CallSession]] = {}          # call_id -> (visitor, cid, session)
+CALLS_TODAY: dict[tuple[str, str], int] = {}                 # (visitor, day) -> calls started
+
+
+def visitor_id(x_visitor: str | None) -> str:
+    """Each browser sends a random id. Locally everyone shares one copy."""
+    if not PUBLIC:
+        return "local"
+    if not x_visitor or not re.fullmatch(r"[A-Za-z0-9_-]{8,40}", x_visitor):
+        raise HTTPException(400, "Missing visitor id. Reload the page.")
+    return x_visitor
+
+
+def sandbox(visitor: str, cid: str) -> Live:
+    if cid not in TEMPLATES:
+        raise HTTPException(404, f"unknown customer {cid}")
+    now = time.time()
+    for key in [k for k, lv in SANDBOXES.items() if now - lv.used > SANDBOX_IDLE_SECONDS]:
+        SANDBOXES.pop(key).discard()
+    key = (visitor, cid)
+    if key not in SANDBOXES:
+        while len(SANDBOXES) >= MAX_SANDBOXES:
+            SANDBOXES.popitem(last=False)[1].discard()
+        SANDBOXES[key] = Live(cid, visitor)
+    SANDBOXES.move_to_end(key)
+    SANDBOXES[key].used = now
+    return SANDBOXES[key]
+
+
+def live_calls_mode() -> str:
+    if not llm.has_credentials():
+        return "off"
+    return "invite" if PUBLIC else "open"
+
+
+def require_live_calls(x_invite: str | None):
+    mode = live_calls_mode()
+    if mode == "off":
+        raise HTTPException(400, "Live calls are off: no API key is configured.")
+    if mode == "invite" and (x_invite or "").strip() not in INVITE_CODES:
+        raise HTTPException(403, "Live calls need an invite code. Everything else on the site is open to browse.")
+
+
+@app.get("/")
+def index():
+    return FileResponse(HERE / "static" / "index.html")
+
+
+@app.get("/api/status")
+def status():
+    out = {"api_key": llm.has_credentials(), "model": llm.MODEL, "public": PUBLIC,
+           "live_calls": live_calls_mode()}
+    if not PUBLIC:  # the owner sees spend; visitors don't
+        out.update(spent_today=budget.spent(source="webapp"), daily_budget=budget.daily_budget())
+    return out
+
+
+def _friendly_api_error(e: anthropic.APIError) -> HTTPException:
+    """Turn API failures into messages a person can act on."""
+    text = getattr(e, "message", str(e)).lower()
+    if PUBLIC:
+        return HTTPException(503, "The live demo is unavailable right now. You can still browse recorded calls under Eval runs.")
+    if isinstance(e, anthropic.AuthenticationError):
+        return HTTPException(401, "The API key was rejected. Check the key in your key file, or create a new one at platform.claude.com.")
+    if "credit balance" in text or "billing" in text:
+        return HTTPException(402, "Your API credits have run out. Add credits at platform.claude.com under Billing, then try again.")
+    if isinstance(e, anthropic.RateLimitError):
+        return HTTPException(429, "Too many requests right now. Wait a few seconds and try again.")
+    if isinstance(e, anthropic.APIConnectionError):
+        return HTTPException(503, "Can't reach the Claude API. Check your internet connection.")
+    return HTTPException(502, f"The Claude API returned an error: {getattr(e, 'message', e)}")
+
+
+@app.get("/api/customers")
+def customers():
+    out = []
+    for cid, lv in TEMPLATES.items():
+        c, pb = lv.customer, lv.customer.PLAYBOOK
+        scenarios = yaml.safe_load(c.SCENARIOS.read_text())["scenarios"]
+        out.append({"id": cid, "name": pb.customer, "industry": c.INDUSTRY, "summary": c.SUMMARY,
+                    "workflows": pb.workflows, "scenarios": len(scenarios),
+                    "latest_run": _latest_run(cid)})
+    return out
+
+
+@app.get("/api/customers/{cid}")
+def customer(cid: str):
+    if cid not in TEMPLATES:
+        raise HTTPException(404, f"unknown customer {cid}")
+    lv = TEMPLATES[cid]
+    c, pb = lv.customer, lv.customer.PLAYBOOK
+    session = CallSession(pb, lv.adapter, Notifier("outbox", lv.outbox), "", lv.clock[0])
+    return {
+        "id": cid, "name": pb.customer, "industry": c.INDUSTRY, "summary": c.SUMMARY,
+        "workflows": [{"name": w.name, "tools": [t["name"] for t in w.tools()],
+                       "doc": (sys.modules[type(w).__module__].__doc__ or "").strip()}
+                      for w in session.workflows],
+        "playbook": (c.HERE / "playbook.yaml").read_text(),
+        "discovery": c.DISCOVERY.read_text(),
+        "scenarios": yaml.safe_load(c.SCENARIOS.read_text())["scenarios"],
+        "sample_callers": [{"phone": p, "label": l} for p, l in c.SAMPLE_CALLERS],
+        "demo_calls": getattr(c, "DEMO_CALLS", []),
+        "disclosure": pb.disclosure,
+    }
+
+
+class NewCall(BaseModel):
+    caller_phone: str
+    call_time: str | None = None  # "YYYY-MM-DDTHH:MM", local time; default now
+
+
+@app.post("/api/customers/{cid}/calls")
+def start_call(cid: str, body: NewCall, x_visitor: str | None = Header(None),
+               x_invite: str | None = Header(None)):
+    visitor = visitor_id(x_visitor)
+    require_live_calls(x_invite)
+    if PUBLIC:
+        day = (visitor, date.today().isoformat())
+        if CALLS_TODAY.get(day, 0) >= MAX_CALLS_PER_VISITOR_PER_DAY:
+            raise HTTPException(429, f"That's {MAX_CALLS_PER_VISITOR_PER_DAY} calls today, the demo limit. Come back tomorrow, or browse recorded calls under Eval runs.")
+        CALLS_TODAY[day] = CALLS_TODAY.get(day, 0) + 1
+    lv = sandbox(visitor, cid)
+    now = (datetime.fromisoformat(body.call_time).replace(tzinfo=lv.tz)
+           if body.call_time else datetime.now(lv.tz))
+    lv.clock[0] = now
+    session = CallSession(lv.customer.PLAYBOOK, lv.adapter, Notifier("outbox", lv.outbox),
+                          body.caller_phone[:20], now)
+    greeting = session.start()
+    call_id = uuid.uuid4().hex
+    CALLS[call_id] = (visitor, cid, session)
+    return {"call_id": call_id, "greeting": greeting}
+
+
+class Say(BaseModel):
+    text: str
+
+
+def _own_call(call_id: str, visitor: str) -> tuple[str, CallSession]:
+    found = CALLS.get(call_id)
+    if not found or found[0] != visitor:   # a visitor can only see their own calls
+        raise HTTPException(404, "call not found")
+    return found[1], found[2]
+
+
+@app.post("/api/calls/{call_id}/say")
+def say(call_id: str, body: Say, x_visitor: str | None = Header(None),
+        x_invite: str | None = Header(None)):
+    visitor = visitor_id(x_visitor)
+    cid, session = _own_call(call_id, visitor)
+    require_live_calls(x_invite)
+    if session.ended:
+        raise HTTPException(400, "The agent already ended this call.")
+    turns = sum(1 for t in session.record["transcript"] if t["speaker"] == "caller")
+    if turns >= MAX_TURNS_PER_CALL:
+        raise HTTPException(429, f"This call reached the {MAX_TURNS_PER_CALL}-turn demo limit. Start a new call.")
+    if budget.over_budget("webapp"):
+        raise HTTPException(429, "Today's demo budget is used up. Browse recorded calls under Eval runs, or try again tomorrow."
+                            if PUBLIC else
+                            f"Today's demo budget of ${budget.daily_budget():.2f} is used up. "
+                            "Raise DAILY_BUDGET_USD in your key file and restart, or try again tomorrow.")
+    sandbox(visitor, cid).clock[0] = session.now
+    llm.start_tally("webapp")
+    try:
+        reply = session.reply(body.text[:1000])
+    except anthropic.APIError as e:
+        raise _friendly_api_error(e)
+    session.record["cost_usd"] = round(session.record.get("cost_usd", 0) + (llm.tally()["cost_usd"] or 0), 4)
+    return {"reply": reply, **_call_view(session)}
+
+
+@app.get("/api/calls/{call_id}")
+def get_call(call_id: str, x_visitor: str | None = Header(None)):
+    _, session = _own_call(call_id, visitor_id(x_visitor))
+    return _call_view(session)
+
+
+def _call_view(s: CallSession) -> dict:
+    r = s.record
+    view = {"ended": s.ended, "transcript": r["transcript"], "events": r["events"],
+            "tool_calls": r["tool_calls"], "guardrail_flags": r["guardrail_flags"]}
+    if not PUBLIC:
+        view.update(cost_usd=r.get("cost_usd", 0), spent_today=budget.spent(source="webapp"),
+                    daily_budget=budget.daily_budget())
+    return view
+
+
+@app.get("/api/customers/{cid}/staff")
+def staff(cid: str, x_visitor: str | None = Header(None)):
+    lv = sandbox(visitor_id(x_visitor), cid)
+    texts = [json.loads(l) for l in lv.outbox.read_text().splitlines() if l.strip()]
+    return {"tables": lv.customer.staff_view(lv.adapter), "texts": list(reversed(texts))}
+
+
+@app.post("/api/customers/{cid}/reset")
+def reset(cid: str, x_visitor: str | None = Header(None)):
+    sandbox(visitor_id(x_visitor), cid).reset()
+    return {"ok": True}
+
+
+# ---- write-up documents ----------------------------------------------------------
+
+DOCS = {"findings": "FINDINGS.md", "decisions": "DECISIONS.md", "plan": "PLAN.md"}
+
+
+@app.get("/api/docs/{name}")
+def doc(name: str):
+    if name not in DOCS:
+        raise HTTPException(404, "unknown document")
+    return {"name": name, "markdown": (HERE.parent / DOCS[name]).read_text()}
+
+
+# ---- eval runs ----------------------------------------------------------------
+
+def _run_dirs():
+    found = {}
+    for root in (SHOWCASE, RUNS):   # a run in both places is listed once
+        if root.exists():
+            for d in root.iterdir():
+                if d.is_dir() and d.name != "live":
+                    found.setdefault(d.name, d)
+    return sorted(found.values(), key=lambda d: d.name, reverse=True)
+
+
+def _run_summary(d: Path) -> dict:
+    # Folder names look like "<customer>-<YYYYmmdd>-<HHMMSS>".
+    customer, day, clock = d.name.rsplit("-", 2)
+    records = [json.loads(f.read_text()) for f in sorted(d.glob("*.json"))]
+    return {"id": d.name, "customer": customer,
+            "when": datetime.strptime(f"{day}{clock}", "%Y%m%d%H%M%S").isoformat(),
+            "calls": len(records), "passed": sum(r.get("passed", False) for r in records)}
+
+
+def _latest_run(cid: str):
+    for d in _run_dirs():
+        if d.name.rsplit("-", 2)[0] == cid:
+            return _run_summary(d)
+    return None
+
+
+@app.get("/api/runs")
+def runs():
+    return [_run_summary(d) for d in _run_dirs()]
+
+
+@app.get("/api/runs/{run_id}")
+def run_detail(run_id: str):
+    d = next((x for x in _run_dirs() if x.name == run_id), None)
+    if not re.fullmatch(r"[a-z_]+-\d{8}-\d{6}", run_id) or d is None:
+        raise HTTPException(404, "run not found")
+    report = (d / "report.md").read_text() if (d / "report.md").exists() else ""
+    return {**_run_summary(d), "report": report,
+            "records": [json.loads(f.read_text()) for f in sorted(d.glob("*.json"))]}

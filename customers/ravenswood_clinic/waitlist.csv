@@ -1,0 +1,4 @@
+patient_id,name,phone,visit_type,added_on,note
+pt-1006,Samuel Okoro,+17735550106,follow_up,2026-11-02,wants anything sooner with Dr. Morales
+pt-1007,Linda Novak,+17735550107,follow_up,2026-11-05,mornings only
+pt-1009,Kwame Mensah,+17735550109,annual_physical,2026-11-09,any clinician

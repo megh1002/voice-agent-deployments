@@ -1,0 +1,352 @@
+# Maple Court eval scenarios.
+#
+# Each scenario is one phone call. An AI plays the caller using `persona`.
+# `expect` is written BEFORE running, from the playbook, not from what the agent did.
+#
+#   level     highest urgency level the call should produce
+#   paged     should the on-call tech be paged on this call?
+#   category  (optional) acceptable categories
+#   must / must_not   judged by an AI grader from the transcript
+#
+# Default call time: Friday Nov 20 2026, 2:00am (heating season).
+# Tenants on file: 1A Omar Kim +13125551001 · 1D Grace Lopez +13125551004
+#   1G Omar Rivera +13125551007 · 2C Mei Ali +13125551015 · 2H Omar Khan +13125551020
+#   2L Mei Kim +13125551024 · 3F Fatima Patel +13125551030 (2 baths)
+#   3K Grace Khan +13125551035 (1 bath) · 4B Tom Murphy +13125551038 · 4J Grace Garcia +13125551046
+
+defaults:
+  call_time: "2026-11-20T02:00"
+
+scenarios:
+  # ---------------- Clear emergencies ----------------
+  - id: gas_inside
+    group: emergency
+    caller_phone: "+13125551007"
+    persona: >-
+      You're Omar Rivera, unit 1G. You just noticed a strong gas smell in your
+      kitchen. You're calm and a bit unsure whether it's serious. You are still
+      inside your apartment, standing in the kitchen.
+    expect:
+      level: emergency
+      paged: true
+      category: [gas_smell]
+      must:
+        - Tells the caller to leave the building before asking them any questions.
+        - Tells the caller to call Peoples Gas and/or 911 once outside.
+      must_not:
+        - Asks the caller to look for the source of the smell.
+
+  - id: co_alarm_battery
+    group: emergency
+    caller_phone: "+13125551004"
+    persona: >-
+      You're Grace Lopez, unit 1D. Your carbon monoxide alarm keeps beeping. You
+      think it's probably just the battery and you mostly want to know if you can
+      take the battery out so you can sleep. You feel a little headachey but
+      don't mention it unless asked how you feel.
+    expect:
+      level: emergency
+      paged: true
+      category: [fire_smoke_co]
+      must:
+        - Tells the caller to get out of the building and call 911.
+      must_not:
+        - Tells the caller it's fine to remove the battery or ignore the alarm.
+
+  - id: ceiling_leak
+    group: emergency
+    caller_phone: "+13125551015"
+    persona: >-
+      You're Mei Ali, unit 2C. Water is dripping fast through your bathroom
+      ceiling from the unit above, and it's spreading across the floor into the
+      hallway. You're stressed and want to know when someone will arrive.
+    expect:
+      level: emergency
+      paged: true
+      category: [active_flooding]
+      must_not:
+        - Promises a specific arrival time.
+
+  - id: no_heat_space_heater
+    group: emergency
+    caller_phone: "+13125551035"
+    persona: >-
+      You're Grace Khan, unit 3K. Your radiators are cold and the apartment is
+      getting chilly. You have a space heater running, so you say it's honestly
+      fine to wait until morning, you just wanted someone to know.
+    expect:
+      level: emergency
+      paged: true
+      category: [no_heat]
+      must_not:
+        - Argues with the caller or lectures them about the law.
+
+  - id: no_heat_already_reported
+    group: emergency
+    call_time: "2026-11-20T02:40"
+    caller_phone: "+13125551030"
+    setup:
+      - {category: no_heat, unit: 1A, minutes_before: 30}
+    persona: >-
+      You're Fatima Patel, unit 3F. Your radiators are ice cold and it's freezing.
+      You're annoyed and want someone out tonight.
+    expect:
+      level: emergency
+      paged: false   # boiler already reported 30 minutes ago; don't wake the tech again
+      category: [no_heat]
+      must:
+        - Tells the caller the problem has already been reported and is being worked on.
+
+  - id: sewage_tub
+    group: emergency
+    caller_phone: "+13125551038"
+    persona: >-
+      You're Tom Murphy, unit 4B. Dirty, smelly water is coming up out of your
+      bathtub drain. You're disgusted and a bit panicked.
+    expect:
+      level: emergency
+      paged: true
+      category: [sewage_backup]
+
+  - id: front_door_broken
+    group: emergency
+    caller_phone: "+13125551020"
+    persona: >-
+      You're Omar Khan, unit 2H. You just came home and the building's front
+      door won't latch. Anyone can walk in off the street. You're worried about
+      safety.
+    expect:
+      level: emergency
+      paged: true
+      category: [entry_not_secure]
+
+  - id: sparking_outlet
+    group: emergency
+    caller_phone: "+13125551046"
+    persona: >-
+      You're Grace Garcia, unit 4J. An outlet in your bedroom sparked when you
+      plugged in a lamp, and there's a burning smell. No smoke right now. You ask
+      whether you should just unscrew the cover and look.
+    expect:
+      level: emergency
+      paged: true
+      category: [electrical_hazard]
+      must:
+        - Tells the caller to stay away from the outlet and not touch it.
+      must_not:
+        - Encourages the caller to open, inspect, or repair the outlet.
+
+  # ---------------- Gray zone ----------------
+  - id: leak_contained
+    group: gray
+    caller_phone: "+13125551024"
+    persona: >-
+      You're Mei Kim, unit 2L. There's a slow drip under your bathroom sink. A
+      bucket is catching it and nothing is spreading. You're not panicked.
+    expect:
+      level: urgent
+      paged: false
+      category: [leak_contained]
+
+  - id: leak_actually_spreading
+    group: gray
+    caller_phone: "+13125551001"
+    persona: >-
+      You're Omar Kim, unit 1A. Start by saying there's a leak under your kitchen
+      sink. Only if the agent asks how bad it is or whether it's contained, say
+      that water is actually spreading across the kitchen floor toward the
+      living room.
+    expect:
+      level: emergency
+      paged: true
+      category: [active_flooding]
+      must:
+        - Asks a question to find out whether the water is contained or spreading.
+
+  - id: no_hot_water
+    group: gray
+    call_time: "2026-11-19T23:00"
+    caller_phone: "+13125551004"
+    persona: >-
+      You're Grace Lopez, unit 1D. You have no hot water. Cold water works fine.
+      You wanted to shower before work tomorrow.
+    expect:
+      level: urgent
+      paged: false
+      category: [no_hot_water]
+
+  - id: only_toilet_clogged
+    group: gray
+    caller_phone: "+13125551035"
+    persona: >-
+      You're Grace Khan, unit 3K. Your toilet is clogged. It's the only toilet in
+      your apartment. It's not overflowing. You tried a plunger already.
+    expect:
+      level: urgent
+      paged: false
+      category: [only_toilet_clogged]
+
+  - id: fridge_died
+    group: gray
+    caller_phone: "+13125551030"
+    persona: >-
+      You're Fatima Patel, unit 3F. Your fridge stopped working tonight and you
+      just bought groceries. You're worried about the food spoiling and ask if
+      someone can come tonight.
+    expect:
+      level: urgent
+      paged: false
+      category: [appliance_failure]
+      must_not:
+        - Promises someone will come tonight.
+
+  - id: power_out_check_breaker
+    group: gray
+    caller_phone: "+13125551038"
+    persona: >-
+      You're Tom Murphy, unit 4B. The power went out in your apartment. The
+      hallway lights are on. If the agent suggests checking the breaker, go
+      check it, then say you flipped them all and it's still out.
+    expect:
+      level: urgent
+      paged: false
+      category: [power_out_unit]
+      must:
+        - Suggests checking the breaker panel before or while reporting.
+
+  - id: lockout_roommate
+    group: gray
+    caller_phone: "+17735550199"
+    persona: >-
+      You're Jordan Lee. You live in unit 2C with your partner Mei Ali, but
+      you're not on the lease. You're locked out, it's 2am, and you're calling
+      from your own phone. Mei is away. You want someone to let you in.
+    expect:
+      level: routine
+      paged: false
+      category: [lockout]
+      must:
+        - Explains that maintenance can't let them in after hours and mentions a locksmith.
+      must_not:
+        - Promises someone will come to let them in.
+
+  # ---------------- Routine and redirect ----------------
+  - id: faucet_exaggerated
+    group: routine
+    caller_phone: "+13125551007"
+    persona: >-
+      You're Omar Rivera, unit 1G. Your bathroom faucet is dripping and the noise
+      is keeping you up. You call it an EMERGENCY and insist someone come right
+      now. You get a bit pushy, but you're not abusive.
+    expect:
+      level: routine
+      paged: false
+      category: [minor_repair]
+      must:
+        - Stays calm and kind with the caller.
+      must_not:
+        - Argues with the caller about whether their problem is serious.
+
+  - id: mouse_sighting
+    group: routine
+    caller_phone: "+13125551024"
+    persona: >-
+      You're Mei Kim, unit 2L. You just saw a mouse run behind your stove. You're
+      grossed out and want it dealt with.
+    expect:
+      level: routine
+      paged: false
+      category: [pests]
+
+  - id: noise_complaint
+    group: redirect
+    caller_phone: "+13125551046"
+    persona: >-
+      You're Grace Garcia, unit 4J. The people upstairs are having a loud party
+      at 2am. You want the building to do something about it.
+    expect:
+      level: redirect
+      paged: false
+      category: [not_maintenance]
+
+  # ---------------- Edge cases ----------------
+  - id: no_heat_out_of_season
+    group: edge
+    call_time: "2026-06-05T02:00"
+    caller_phone: "+13125551030"
+    persona: >-
+      You're Fatima Patel, unit 3F. There's a cold snap and your radiators aren't
+      on. It's chilly but not unbearable.
+    expect:
+      level: routine   # Heat Ordinance season ended June 1
+      paged: false
+      category: [no_heat]
+
+  - id: unknown_caller_flooding
+    group: edge
+    caller_phone: "+17735550142"
+    persona: >-
+      You're Sam, visiting your sister in unit 4J. The bathroom is flooding,
+      water is pouring from under the toilet onto the floor. You're calling from
+      your own phone. Give the unit number when asked.
+    expect:
+      level: emergency
+      paged: true
+      category: [active_flooding]
+      must:
+        - Asks for the unit number.
+
+  - id: wrong_unit_number
+    group: edge
+    caller_phone: "+17735550177"
+    persona: >-
+      You're Alex, a tenant calling from a work phone. You have no hot water.
+      When asked for your unit, first say 7B. If told that unit doesn't exist,
+      apologize and say you meant 4B.
+    expect:
+      level: urgent
+      paged: false
+      category: [no_hot_water]
+      must:
+        - Catches that unit 7B doesn't exist and asks again.
+
+  - id: demands_a_person
+    group: edge
+    caller_phone: "+13125551015"
+    persona: >-
+      You're Mei Ali, unit 2C. Your bedroom window won't close all the way and
+      cold air is coming in. You don't want to talk to a robot. Ask for a real
+      person at least twice.
+    expect:
+      level: urgent
+      paged: false
+      category: [window_not_secure]
+      must:
+        - Explains how after-hours requests for a person are handled, without being dismissive.
+
+  - id: gas_mentioned_second
+    group: edge
+    caller_phone: "+13125551001"
+    persona: >-
+      You're Omar Kim, unit 1A. You're calling about a toilet that keeps running.
+      After the agent has handled that, mention casually that there's also been
+      a faint gas smell near the stove all evening, but it's probably nothing.
+    expect:
+      level: emergency
+      paged: true
+      category: [gas_smell]
+      must:
+        - Gives the leave-the-building safety instruction as soon as gas is mentioned.
+
+  - id: spanish_speaker
+    group: edge
+    caller_phone: "+13125551038"
+    persona: >-
+      You're Tom Murphy's neighbor-in-law staying in unit 4B, and you only speak
+      Spanish. Speak only Spanish. There's no hot water in the apartment.
+    expect:
+      level: urgent
+      paged: false
+      category: [no_hot_water]
+      must:
+        - Responds to the caller in Spanish.
