@@ -12,6 +12,7 @@ Two modes:
                      per-visitor limits apply. Browsing everything else is free.
 """
 
+import hmac
 import json
 import os
 import re
@@ -25,8 +26,8 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 import yaml
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -328,3 +329,94 @@ def run_detail(run_id: str):
     report = (d / "report.md").read_text() if (d / "report.md").exists() else ""
     return {**_run_summary(d), "report": report,
             "records": [json.loads(f.read_text()) for f in sorted(d.glob("*.json"))]}
+
+
+# ---- real phone calls (Vapi) ------------------------------------------------------
+# Vapi runs the phone line, speech-to-text, and the voice. It sends each caller
+# turn here in the OpenAI chat format; this agent stays the brain. Vapi passes the
+# secret we gave it as a bearer token. Leave VAPI_SECRET unset to turn phone off.
+
+PHONE_CUSTOMER = os.environ.get("PHONE_CUSTOMER", "ravenswood_clinic")
+PHONE_CALLS: dict[str, CallSession] = {}
+
+
+def _latest_caller_text(messages: list[dict]) -> str:
+    for m in reversed(messages or []):
+        if m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, list):  # content parts
+                c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+            return (c or "").strip()
+        if m.get("role") == "assistant":
+            return ""  # nothing new from the caller since our last reply
+    return ""
+
+
+def _sse(call_id: str, text: str):
+    base = {"id": f"chatcmpl-{call_id[:24]}", "object": "chat.completion.chunk",
+            "created": int(time.time()), "model": llm.MODEL}
+    yield "data: " + json.dumps({**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": text},
+                                                      "finish_reason": None}]}) + "\n\n"
+    yield "data: " + json.dumps({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}) + "\n\n"
+    yield "data: [DONE]\n\n"
+
+
+@app.post("/vapi/chat/completions")
+def vapi_turn(body: dict = Body(...), authorization: str | None = Header(None)):
+    secret = os.environ.get("VAPI_SECRET")
+    if not secret:
+        raise HTTPException(503, "Phone calls are not configured.")
+    if not hmac.compare_digest(authorization or "", f"Bearer {secret}"):
+        raise HTTPException(401, "Unauthorized")
+
+    call = body.get("call") or {}
+    call_id = re.sub(r"[^A-Za-z0-9_-]", "", str(call.get("id") or "unknown"))[:40] or "unknown"
+    caller = str((call.get("customer") or {}).get("number") or "unknown")[:20]
+    session = PHONE_CALLS.get(call_id)
+    if session is None:
+        lv = sandbox(f"phone-{call_id}", PHONE_CUSTOMER)
+        session = CallSession(lv.customer.PLAYBOOK, lv.adapter, Notifier("outbox", lv.outbox),
+                              caller, datetime.now(lv.tz))
+        session.start()  # the same disclosure Vapi plays as its first message
+        PHONE_CALLS[call_id] = session
+
+    text = _latest_caller_text(body.get("messages"))
+    turns = sum(1 for t in session.record["transcript"] if t["speaker"] == "caller")
+    if not text:
+        reply = ""
+    elif session.ended:
+        reply = "Thanks for calling. Goodbye."
+    elif turns >= MAX_TURNS_PER_CALL or budget.over_budget("webapp") or budget.over_budget("phone"):
+        reply = ("I'm sorry, this demo line has reached its limit. If this is an emergency, "
+                 "please hang up and call 911. Goodbye.")
+    else:
+        llm.start_tally("phone")
+        started = time.time()
+        try:
+            reply = session.reply(text[:1000])
+        except anthropic.APIError:
+            reply = "I'm sorry, I'm having trouble right now. If this is an emergency, please call 911."
+        took = round(time.time() - started, 2)
+        session.record.setdefault("latencies_s", []).append(took)
+        session.record["cost_usd"] = round(session.record.get("cost_usd", 0) + (llm.tally()["cost_usd"] or 0), 4)
+        # Content stays out of the logs; timing and cost are what we measure.
+        print(f"phone call={call_id} turn={turns + 1} reply_seconds={took} "
+              f"events={[e['type'] for e in session.record['events']]} cost=${session.record['cost_usd']}", flush=True)
+
+    if body.get("stream") is False:
+        return {"id": f"chatcmpl-{call_id[:24]}", "object": "chat.completion", "created": int(time.time()),
+                "model": llm.MODEL, "choices": [{"index": 0, "finish_reason": "stop",
+                                                 "message": {"role": "assistant", "content": reply}}]}
+    return StreamingResponse(_sse(call_id, reply), media_type="text/event-stream")
+
+
+@app.get("/api/phone/calls")
+def phone_calls(x_admin: str | None = Header(None)):
+    """Recent phone calls with timings, for the owner (same secret as Vapi)."""
+    secret = os.environ.get("VAPI_SECRET")
+    if not secret or not hmac.compare_digest(x_admin or "", secret):
+        raise HTTPException(401, "Unauthorized")
+    return [{"call": cid, "caller_turns": sum(1 for t in s.record["transcript"] if t["speaker"] == "caller"),
+             "latencies_s": s.record.get("latencies_s", []), "events": s.record["events"],
+             "transcript": s.record["transcript"], "cost_usd": s.record.get("cost_usd", 0)}
+            for cid, s in list(PHONE_CALLS.items())[-10:]]
