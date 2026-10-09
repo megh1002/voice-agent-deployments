@@ -7,9 +7,9 @@ Two modes:
   local (default)  - for the owner: one shared copy of each customer's systems,
                      live calls open, today's API spend shown in the header.
   public           - PUBLIC_MODE=1, for a hosted demo: every visitor gets their
-                     own private copy of each customer's systems, live calls
-                     need an invite code (INVITE_CODES), spend is hidden, and
-                     per-visitor limits apply. Browsing everything else is free.
+                     own private copy of each customer's systems, spend is
+                     hidden, and limits protect the API budget: a daily dollar
+                     cap, calls per visitor and per network, turns per call.
 """
 
 import hmac
@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 import yaml
-from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -43,9 +43,9 @@ LIVE = RUNS / "live"
 SHOWCASE = HERE.parent / "showcase"
 
 PUBLIC = os.environ.get("PUBLIC_MODE") == "1"
-INVITE_CODES = {c.strip() for c in os.environ.get("INVITE_CODES", "").split(",") if c.strip()}
 MAX_TURNS_PER_CALL = 20
 MAX_CALLS_PER_VISITOR_PER_DAY = 8
+MAX_CALLS_PER_NETWORK_PER_DAY = 20  # visitor ids are easy to reset; IP addresses less so
 MAX_SANDBOXES = 300
 SANDBOX_IDLE_SECONDS = 2 * 60 * 60
 
@@ -107,17 +107,23 @@ def sandbox(visitor: str, cid: str) -> Live:
 
 
 def live_calls_mode() -> str:
-    if not llm.has_credentials():
-        return "off"
-    return "invite" if PUBLIC else "open"
+    return "open" if llm.has_credentials() else "off"
 
 
-def require_live_calls(x_invite: str | None):
-    mode = live_calls_mode()
-    if mode == "off":
+def require_live_calls():
+    if live_calls_mode() == "off":
         raise HTTPException(400, "Live calls are off: no API key is configured.")
-    if mode == "invite" and (x_invite or "").strip() not in INVITE_CODES:
-        raise HTTPException(403, "Live calls need an invite code. Everything else on the site is open to browse.")
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")  # set by the host's proxy
+    return forwarded.split(",")[0].strip() or (request.client.host if request.client else "unknown")
+
+
+def _count_call(key: tuple[str, str], limit: int, message: str):
+    if CALLS_TODAY.get(key, 0) >= limit:
+        raise HTTPException(429, message)
+    CALLS_TODAY[key] = CALLS_TODAY.get(key, 0) + 1
 
 
 @app.get("/")
@@ -189,15 +195,14 @@ class NewCall(BaseModel):
 
 
 @app.post("/api/customers/{cid}/calls")
-def start_call(cid: str, body: NewCall, x_visitor: str | None = Header(None),
-               x_invite: str | None = Header(None)):
+def start_call(cid: str, body: NewCall, request: Request, x_visitor: str | None = Header(None)):
     visitor = visitor_id(x_visitor)
-    require_live_calls(x_invite)
+    require_live_calls()
     if PUBLIC:
-        day = (visitor, date.today().isoformat())
-        if CALLS_TODAY.get(day, 0) >= MAX_CALLS_PER_VISITOR_PER_DAY:
-            raise HTTPException(429, f"That's {MAX_CALLS_PER_VISITOR_PER_DAY} calls today, the demo limit. Come back tomorrow, or browse recorded calls under Eval runs.")
-        CALLS_TODAY[day] = CALLS_TODAY.get(day, 0) + 1
+        today = date.today().isoformat()
+        limit_msg = "That's the demo's daily call limit. Come back tomorrow, or browse recorded calls under Eval runs."
+        _count_call(("visitor:" + visitor, today), MAX_CALLS_PER_VISITOR_PER_DAY, limit_msg)
+        _count_call(("ip:" + _client_ip(request), today), MAX_CALLS_PER_NETWORK_PER_DAY, limit_msg)
     lv = sandbox(visitor, cid)
     now = (datetime.fromisoformat(body.call_time).replace(tzinfo=lv.tz)
            if body.call_time else datetime.now(lv.tz))
@@ -222,11 +227,10 @@ def _own_call(call_id: str, visitor: str) -> tuple[str, CallSession]:
 
 
 @app.post("/api/calls/{call_id}/say")
-def say(call_id: str, body: Say, x_visitor: str | None = Header(None),
-        x_invite: str | None = Header(None)):
+def say(call_id: str, body: Say, x_visitor: str | None = Header(None)):
     visitor = visitor_id(x_visitor)
     cid, session = _own_call(call_id, visitor)
-    require_live_calls(x_invite)
+    require_live_calls()
     if session.ended:
         raise HTTPException(400, "The agent already ended this call.")
     turns = sum(1 for t in session.record["transcript"] if t["speaker"] == "caller")

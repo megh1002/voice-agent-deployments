@@ -142,8 +142,6 @@ details { margin-top: 6px; } summary { cursor: pointer; color: var(--muted); fon
 
 .why p { margin: 0 0 10px; max-width: 820px; }
 .synth { font-size: 13px; background: var(--accent-soft); border: 1px solid var(--line); border-radius: 12px; padding: 9px 13px; margin-bottom: 14px; }
-.notice.invite form { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-.notice.invite input { flex: 1 1 180px; }
 
 /* ---------------------------------------------------------------- voice orb */
 .orb-wrap { display: grid; place-items: center; gap: 14px; }
@@ -278,7 +276,7 @@ const store = {
 // A random id so a hosted demo can give each visitor their own private copy of the clinic.
 let VISITOR = store.get("visitor");
 if (!VISITOR) { VISITOR = (crypto.randomUUID?.() || String(Math.random()).slice(2) + Date.now()).replace(/[^A-Za-z0-9-]/g, ""); store.set("visitor", VISITOR); }
-const headers = () => ({"Content-Type": "application/json", "X-Visitor": VISITOR, "X-Invite": store.get("invite") || ""});
+const headers = () => ({"Content-Type": "application/json", "X-Visitor": VISITOR});
 const api = async (path, opts) => {
   const r = await fetch(path, opts ? {method: opts.method || "POST", headers: headers(), body: JSON.stringify(opts.body || {})}
                                    : {headers: headers()});
@@ -298,7 +296,7 @@ async function boot() {
   $("#apptag").textContent = APP.tagline;
   [STATUS, CUSTOMERS] = await Promise.all([api("/api/status"), api("/api/customers")]);
   const s = $("#status");
-  const label = {open: `Live · ${STATUS.model}`, invite: "Live calls: invite only", off: "Live calls offline"}[STATUS.live_calls];
+  const label = STATUS.live_calls === "off" ? "Live calls offline" : STATUS.public ? "Live calls on" : `Live · ${STATUS.model}`;
   s.textContent = label;
   s.className = "pill " + (STATUS.live_calls === "off" ? "no" : "ok");
   if (STATUS.spent_today == null) $("#meter").remove();
@@ -580,9 +578,6 @@ function tabCall() {
       </div>
     </div>`;
   $("#start").onclick = startCall;
-  $("#inviteform")?.addEventListener("submit", e => {
-    e.preventDefault(); store.set("invite", $("#invite").value.trim()); tabCall();
-  });
   $("#sayform").onsubmit = e => { e.preventDefault(); sendLine(); };
   $("#mic").onclick = () => (LISTENING ? stopListening() : listen());
   document.querySelectorAll(".minitabs a").forEach(a => a.onclick = () => { SIDE = a.dataset.side; renderSide(); });
@@ -598,10 +593,6 @@ function callNotice() {
     : `<div class="notice"><b>Calls need an Anthropic API key.</b>
       Copy <code>.env.example</code> to <code>.env</code> in the project folder, put your key after <code>ANTHROPIC_API_KEY=</code>, then restart the server.
       Everything else in this app works without it.</div>`;
-  if (STATUS.live_calls === "invite" && !store.get("invite")) return `<div class="notice invite">
-      <b>Live calls are invite-only</b>, so the demo's AI costs stay small. Everything else is open to browse,
-      including recorded test calls under <a href="#/runs">Eval runs</a>.
-      <form id="inviteform"><input type="text" id="invite" placeholder="Invite code" autocomplete="off"><button>Unlock live calls</button></form></div>`;
   return "";
 }
 
@@ -680,7 +671,7 @@ async function renderSide() {
 }
 
 function canCall() {
-  return STATUS.live_calls === "open" || (STATUS.live_calls === "invite" && !!store.get("invite"));
+  return STATUS.live_calls === "open";
 }
 
 function setInputs(on) {
@@ -776,7 +767,6 @@ async function startCall() {
   let r;
   try { r = await api(`/api/customers/${CUR.id}/calls`, {body: {caller_phone: phone, call_time: $("#when").value || null}}); }
   catch (e) {
-    if (/invite code/i.test(e.message)) { store.set("invite", ""); tabCall(); }
     $("#chat").innerHTML = ""; bubble("sys", e.message); return;
   }
   CALL = {id: r.call_id, cid: CUR.id, phone, label: phone === "custom" ? phone : label, started: Date.now()}; saveCall();

@@ -191,6 +191,16 @@ Four levels: **emergency** (page now) · **urgent** (first thing in the morning)
   - An audit log of who viewed or changed which record, and when.
   - Evals keep running on synthetic data; real calls are reviewed only inside the clinic's systems.
 
+## D26. Live calls are open to every visitor, no invite code (Meghna)
+
+- **Chose:** anyone with the link can make live calls on the hosted demo.
+- **Considered:** invite codes handed out with each link (built first, then removed).
+- **Why:** less friction for the people she sends the link to.
+- **What protects the API budget now:** a $1/day dollar cap on web-app spend
+  (the real ceiling, about $30/month at most), 8 calls per visitor and 20 per
+  network per day, and 20 turns per call. Visitor IDs are easy to reset, which is
+  why the per-network limit exists.
+
 ---
 
 ## Open
