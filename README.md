@@ -2,6 +2,9 @@
 
 *A case study in deploying AI phone agents into real workflows, by Meghna Sarda.*
 
+**Live demo: [voice-agent-deployments.up.railway.app](https://voice-agent-deployments.up.railway.app)**
+(try a guided call; the first load may take a few seconds while the server wakes up)
+
 I wanted to understand what it actually takes to deploy a voice agent into a real business workflow, not
 just build the agent. So I worked through it the way a forward-deployed engineer would, for two simulated
 customers: discovery first, then the client's rules written down, their systems connected, identity and
