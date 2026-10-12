@@ -141,6 +141,13 @@ details { margin-top: 6px; } summary { cursor: pointer; color: var(--muted); fon
 .finding .chip { font-family: "JetBrains Mono", monospace; }
 
 .why p { margin: 0 0 10px; max-width: 820px; }
+.modes { display: flex; gap: 4px; padding: 3px; background: var(--panel-hi); border-radius: 12px; width: fit-content; margin-bottom: 12px; }
+.modes a { padding: 6px 12px; color: var(--muted); font-weight: 600; font-size: 13px; cursor: pointer; border-radius: 9px; }
+.modes a:hover { text-decoration: none; color: var(--ink); }
+.modes a.on { color: var(--ink); background: var(--panel-solid); box-shadow: 0 1px 0 var(--line); }
+.vapictl { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.vapictl #vstart { padding: 11px 20px; font-size: 15px; }
+.msg.partial { opacity: .6; }
 .synth { font-size: 13px; background: var(--accent-soft); border: 1px solid var(--line); border-radius: 12px; padding: 9px 13px; margin-bottom: 14px; }
 
 /* ---------------------------------------------------------------- voice orb */
@@ -583,6 +590,7 @@ function tabCall() {
   document.querySelectorAll(".minitabs a").forEach(a => a.onclick = () => { SIDE = a.dataset.side; renderSide(); });
   document.querySelectorAll(".guide").forEach(b => b.onclick = () => useGuide(CUR.demo_calls[+b.dataset.i], b));
   setupVoices();
+  setupModes();
   if (!SpeechRec) $("#voicenote").textContent = "Voice input isn't supported in this browser. Open http://localhost:8770 in Chrome to talk.";
   restoreCall();
 }
@@ -596,6 +604,99 @@ function callNotice() {
   return "";
 }
 
+// ---- natural voice through Vapi: Vapi is the ears and voice; this project's agent is the brain
+let MODE = null;                       // "vapi" or "browser"
+let VAPI = null, VCALL = null, VSTART = null, VPOLL = null, VPARTIAL = null, VSTAFF = null, VLOG = [];
+
+function vapiAvailable() { return !!(STATUS.vapi && STATUS.vapi.customer === CUR.id); }
+
+function setupModes() {
+  if (!vapiAvailable()) { MODE = "browser"; return; }
+  MODE = MODE || "vapi";
+  const name = esc(CUR.agent_name || "the agent");
+  $(".phone-head").insertAdjacentHTML("afterend", `
+    <div class="modes"><a data-mode="vapi">Natural voice</a><a data-mode="browser">Browser voice & typing</a></div>
+    <div id="vapictl" class="vapictl">
+      <button id="vstart">📞 Call ${name}</button><button id="vstop" class="ghost" disabled>Hang up</button>
+      <span class="small muted">Talk through your microphone. Vapi provides the voice; ${name}'s brain is this project's code.</span>
+    </div>`);
+  document.querySelectorAll(".modes a").forEach(a => a.onclick = () => { MODE = a.dataset.mode; applyMode(); });
+  $("#vstart").onclick = startVapiCall;
+  $("#vstop").onclick = () => VAPI?.stop();
+  if (VSTART) {  // a voice call is still running: bring back what was said
+    $("#chat").innerHTML = ""; VLOG.forEach(l => bubble(l.who, l.text));
+    $("#vstart").disabled = true; $("#vstop").disabled = false; startTimer(); voiceState("idle", "On call");
+  }
+  applyMode();
+}
+
+function applyMode() {
+  document.querySelectorAll(".modes a").forEach(a => a.classList.toggle("on", a.dataset.mode === MODE));
+  const v = MODE === "vapi";
+  $("#vapictl").style.display = v ? "" : "none";
+  for (const sel of [".controls", "#sayform", ".voicebar", "#voicenote"]) { const el = $(sel); if (el) el.style.display = v ? "none" : ""; }
+}
+
+async function startVapiCall() {
+  stopListening(); window.speechSynthesis?.cancel();
+  $("#vstart").disabled = true;
+  try {
+    if (!VAPI) {
+      const mod = await import("https://esm.sh/@vapi-ai/web");
+      const Vapi = mod.default?.default || mod.default;
+      VAPI = new Vapi(STATUS.vapi.public_key);
+      wireVapi();
+    }
+    $("#chat").innerHTML = ""; VLOG = []; VSTAFF = null; LAST = null;
+    bubble("sys", "Connecting… allow microphone access if your browser asks.");
+    const call = await VAPI.start(STATUS.vapi.assistant_id);
+    VCALL = call?.id || null;
+    $("#calltitle").textContent = `On a call with ${CUR.name}`;
+    $("#callsub").textContent = VCALL ? "Natural voice via Vapi" : "Natural voice via Vapi (live panel unavailable for this call)";
+  } catch (e) {
+    bubble("sys", "Couldn't start the call: " + (e?.message || e?.error?.message || e));
+    $("#vstart").disabled = false;
+  }
+}
+
+function wireVapi() {
+  VAPI.on("call-start", () => {
+    VSTART = Date.now(); startTimer(); voiceState("idle", "On call");
+    $("#vstop").disabled = false; $("#chat").innerHTML = ""; bubble("sys", "Call connected");
+    clearInterval(VPOLL); VPOLL = setInterval(pollVoice, 2000);
+  });
+  VAPI.on("call-end", () => {
+    clearInterval(VPOLL); pollVoice(); stopTimer(); VSTART = null;
+    voiceState("idle", "Call ended"); bubble("sys", "Call ended.");
+    if ($("#vstop")) { $("#vstop").disabled = true; $("#vstart").disabled = false; }
+  });
+  VAPI.on("speech-start", () => voiceState("speaking"));
+  VAPI.on("speech-end", () => voiceState("listening"));
+  VAPI.on("message", m => {
+    if (m?.type === "speech-update" && m.role === "assistant") voiceState(m.status === "started" ? "speaking" : "listening");
+    if (m?.type !== "transcript") return;
+    const who = m.role === "assistant" ? "agent" : "caller";
+    if (m.transcriptType === "partial") {
+      if (!VPARTIAL || VPARTIAL.dataset.who !== who || !VPARTIAL.isConnected) {
+        VPARTIAL?.remove(); VPARTIAL = bubble(who, m.transcript);
+        if (VPARTIAL) { VPARTIAL.dataset.who = who; VPARTIAL.classList.add("partial"); }
+      } else VPARTIAL.lastChild.textContent = m.transcript;
+      return;
+    }
+    VPARTIAL?.remove(); VPARTIAL = null;
+    VLOG.push({who, text: m.transcript}); bubble(who, m.transcript);
+  });
+  VAPI.on("error", e => bubble("sys", "Voice error: " + (e?.error?.message || e?.message || "see the browser console")));
+}
+
+async function pollVoice() {
+  if (!VCALL) return;
+  try {
+    const v = await api(`/api/voice/calls/${VCALL}`);
+    if (v.found) { LAST = v; VSTAFF = v.staff; renderSide(); }
+  } catch {}
+}
+
 function voiceState(state, label) {
   const orb = $("#orb"); if (!orb) return;
   orb.className = "orb small " + (state === "idle" ? "" : state);
@@ -607,8 +708,9 @@ function startTimer() {
   clearInterval(TICK);
   const t = $("#timer");
   const draw = () => {
-    if (!$("#timer") || !CALL) return clearInterval(TICK);
-    const s = Math.floor((Date.now() - CALL.started) / 1000);
+    const t0 = VSTART || CALL?.started;
+    if (!$("#timer") || !t0) return clearInterval(TICK);
+    const s = Math.floor((Date.now() - t0) / 1000);
     $("#timer").textContent = `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
   };
   t.classList.add("live"); draw(); TICK = setInterval(draw, 1000);
@@ -665,7 +767,7 @@ async function renderSide() {
   } else {
     el.innerHTML = `<p class="small muted" style="margin:0 0 10px">What staff see in their own systems (synthetic data). Updates after every turn.</p>
       <div id="staffbody" class="empty small">Loading…</div>`;
-    const s = await api(`/api/customers/${CUR.id}/staff`);
+    const s = (MODE === "vapi" && VSTAFF) ? VSTAFF : await api(`/api/customers/${CUR.id}/staff`);
     if (SIDE === "staff" && $("#staffbody")) { $("#staffbody").className = ""; $("#staffbody").innerHTML = staffHTML(s, true); }
   }
 }

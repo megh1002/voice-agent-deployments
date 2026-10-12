@@ -92,3 +92,15 @@ def test_secret_accepted_in_common_formats(monkeypatch):
         assert client.post("/vapi/chat/completions", json=vapi_body(f"fmt{i}", "hi"), headers=headers).status_code == 200
     assert client.post("/vapi/chat/completions", json=vapi_body("fmtx", "hi"),
                        headers={"X-Api-Key": "wrong"}).status_code == 401
+
+
+def test_page_can_follow_a_voice_call(monkeypatch):
+    client, mod = client_with_secret(monkeypatch)
+    monkeypatch.setenv("VAPI_PUBLIC_KEY", "pub-key"); monkeypatch.setenv("VAPI_ASSISTANT_ID", "asst-1")
+    assert client.get("/api/status").json()["vapi"] == {"public_key": "pub-key", "assistant_id": "asst-1",
+                                                       "customer": "ravenswood_clinic"}
+    assert client.get("/api/voice/calls/nope").json() == {"found": False}
+    monkeypatch.setattr(llm, "create", scripted("How can I help?"))
+    client.post("/vapi/chat/completions", json=vapi_body("live-1", "Hi"), headers=AUTH)
+    v = client.get("/api/voice/calls/live-1").json()
+    assert v["found"] and v["transcript"][-1]["text"] == "How can I help?" and "Staff queues" in v["staff"]["tables"]

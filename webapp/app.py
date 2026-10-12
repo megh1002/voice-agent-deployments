@@ -140,6 +140,10 @@ def status():
            "live_calls": live_calls_mode()}
     if not PUBLIC:  # the owner sees spend; visitors don't
         out.update(spent_today=budget.spent(source="webapp"), daily_budget=budget.daily_budget())
+    # Vapi's public key is meant for web pages (the secret never leaves the server).
+    if os.environ.get("VAPI_PUBLIC_KEY") and os.environ.get("VAPI_ASSISTANT_ID") and os.environ.get("VAPI_SECRET"):
+        out["vapi"] = {"public_key": os.environ["VAPI_PUBLIC_KEY"],
+                       "assistant_id": os.environ["VAPI_ASSISTANT_ID"], "customer": PHONE_CUSTOMER}
     return out
 
 
@@ -444,3 +448,19 @@ def phone_calls(x_admin: str | None = Header(None)):
              "latencies_s": s.record.get("latencies_s", []), "events": s.record["events"],
              "transcript": s.record["transcript"], "cost_usd": s.record.get("cost_usd", 0)}
             for cid, s in list(PHONE_CALLS.items())[-10:]]
+
+
+@app.get("/api/voice/calls/{call_id}")
+def voice_call(call_id: str):
+    """Live events and staff view for one Vapi call, for the page that started it.
+    Call ids are random and unguessable; all data is synthetic."""
+    call_id = re.sub(r"[^A-Za-z0-9_-]", "", call_id)[:40]
+    session = PHONE_CALLS.get(call_id)
+    if session is None:
+        return {"found": False}
+    lv = sandbox(f"phone-{call_id}", PHONE_CUSTOMER)
+    texts = [json.loads(l) for l in lv.outbox.read_text().splitlines() if l.strip()]
+    view = _call_view(session)
+    view.pop("cost_usd", None); view.pop("spent_today", None); view.pop("daily_budget", None)
+    return {"found": True, **view,
+            "staff": {"tables": lv.customer.staff_view(lv.adapter), "texts": list(reversed(texts))}}
