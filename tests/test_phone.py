@@ -82,3 +82,13 @@ def test_no_new_caller_words_means_no_model_call(monkeypatch):
 def teardown_module():
     import webapp.app
     importlib.reload(webapp.app)
+
+
+def test_secret_accepted_in_common_formats(monkeypatch):
+    client, _ = client_with_secret(monkeypatch)
+    monkeypatch.setattr(llm, "create", scripted("a", "b", "c", "d"))
+    for i, headers in enumerate([{"Authorization": "Bearer phone-secret"}, {"Authorization": "phone-secret"},
+                                 {"X-Api-Key": "phone-secret"}, {"Authorization": "Bearer Bearer phone-secret"}]):
+        assert client.post("/vapi/chat/completions", json=vapi_body(f"fmt{i}", "hi"), headers=headers).status_code == 200
+    assert client.post("/vapi/chat/completions", json=vapi_body("fmtx", "hi"),
+                       headers={"X-Api-Key": "wrong"}).status_code == 401

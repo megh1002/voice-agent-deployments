@@ -366,12 +366,24 @@ def _sse(call_id: str, text: str):
     yield "data: [DONE]\n\n"
 
 
+def _phone_authorized(secret: str, authorization: str | None, x_api_key: str | None) -> bool:
+    """Accept the secret however the platform's credential type sends it:
+    'Authorization: Bearer <s>', 'Authorization: <s>', or 'X-Api-Key: <s>'."""
+    offered = [x_api_key or ""]
+    token = (authorization or "").strip()
+    while token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    offered.append(token)
+    return any(o and hmac.compare_digest(o, secret) for o in offered)
+
+
 @app.post("/vapi/chat/completions")
-def vapi_turn(body: dict = Body(...), authorization: str | None = Header(None)):
+def vapi_turn(body: dict = Body(...), authorization: str | None = Header(None),
+              x_api_key: str | None = Header(None)):
     secret = os.environ.get("VAPI_SECRET")
     if not secret:
         raise HTTPException(503, "Phone calls are not configured.")
-    if not hmac.compare_digest(authorization or "", f"Bearer {secret}"):
+    if not _phone_authorized(secret, authorization, x_api_key):
         raise HTTPException(401, "Unauthorized")
 
     call = body.get("call") or {}
