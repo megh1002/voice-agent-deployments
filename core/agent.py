@@ -67,6 +67,7 @@ class CallSession:
         self.tools = [t for w in self.workflows for t in w.tools()] + [END_CALL]
         self.state: dict = {}
         self.ended = False
+        self.on_text = None  # optional callback: receives each piece of speech as soon as it exists
         self.messages: list[dict] = []
         self.record = {
             "customer": playbook.customer, "caller_phone": caller_phone,
@@ -129,6 +130,8 @@ class CallSession:
             self.messages.append({"role": "assistant", "content": resp.content})
             if text := llm.text_of(resp):
                 spoken.append(text)
+                if self.on_text:
+                    self.on_text(text)
             if resp.stop_reason != "tool_use":
                 break
             results = [self._run_tool(b) for b in resp.content if b.type == "tool_use"]

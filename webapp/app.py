@@ -15,8 +15,10 @@ Two modes:
 import hmac
 import json
 import os
+import queue
 import re
 import sys
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -364,15 +366,6 @@ def _latest_caller_text(messages: list[dict]) -> str:
     return ""
 
 
-def _sse(call_id: str, text: str):
-    base = {"id": f"chatcmpl-{call_id[:24]}", "object": "chat.completion.chunk",
-            "created": int(time.time()), "model": llm.MODEL}
-    yield "data: " + json.dumps({**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": text},
-                                                      "finish_reason": None}]}) + "\n\n"
-    yield "data: " + json.dumps({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}) + "\n\n"
-    yield "data: [DONE]\n\n"
-
-
 def _phone_authorized(secret: str, authorization: str | None, x_api_key: str | None) -> bool:
     """Accept the secret however the platform's credential type sends it:
     'Authorization: Bearer <s>', 'Authorization: <s>', or 'X-Api-Key: <s>'."""
@@ -409,33 +402,91 @@ def vapi_turn(body: dict = Body(...), authorization: str | None = Header(None),
         PHONE_CALLS[call_id] = session
 
     text = _latest_caller_text(body.get("messages"))
-    turns = sum(1 for t in session.record["transcript"] if t["speaker"] == "caller")
+    turns = sum(1 for x in session.record["transcript"] if x["speaker"] == "caller")
     if not text:
-        reply = ""
+        canned = ""
     elif session.ended:
-        reply = "Thanks for calling. Goodbye."
+        canned = "Thanks for calling. Goodbye."
     elif turns >= MAX_TURNS_PER_CALL or budget.over_budget("webapp") or budget.over_budget("phone"):
-        reply = ("I'm sorry, this demo line has reached its limit. If this is an emergency, "
-                 "please hang up and call 911. Goodbye.")
+        canned = ("I'm sorry, this demo line has reached its limit. If this is an emergency, "
+                  "please hang up and call 911. Goodbye.")
     else:
-        llm.start_tally("phone")
-        started = time.time()
-        try:
-            reply = session.reply(text[:1000])
-        except anthropic.APIError:
-            reply = "I'm sorry, I'm having trouble right now. If this is an emergency, please call 911."
-        took = round(time.time() - started, 2)
-        session.record.setdefault("latencies_s", []).append(took)
-        session.record["cost_usd"] = round(session.record.get("cost_usd", 0) + (llm.tally()["cost_usd"] or 0), 4)
-        # Content stays out of the logs; timing and cost are what we measure.
-        print(f"phone call={call_id} turn={turns + 1} reply_seconds={took} "
-              f"events={[e['type'] for e in session.record['events']]} cost=${session.record['cost_usd']}", flush=True)
+        canned = None
 
     if body.get("stream") is False:
+        reply = canned if canned is not None else "".join(_run_turn(session, call_id, text, turns))
         return {"id": f"chatcmpl-{call_id[:24]}", "object": "chat.completion", "created": int(time.time()),
                 "model": llm.MODEL, "choices": [{"index": 0, "finish_reason": "stop",
                                                  "message": {"role": "assistant", "content": reply}}]}
-    return StreamingResponse(_sse(call_id, reply), media_type="text/event-stream")
+    pieces = [canned] if canned is not None else _run_turn(session, call_id, text, turns)
+    return StreamingResponse(_sse(call_id, pieces), media_type="text/event-stream")
+
+
+# Phone timing. Model replies usually take 2-6 s, but spikes of 20-40 s happen, and
+# Vapi hangs up if nothing streams within its timeout. So speech is streamed the moment
+# it exists, and if nothing is ready yet the agent says "One moment", as a person would.
+VOICE_MODEL = os.environ.get("VOICE_MODEL") or None
+FILLER_AFTER_S = 4.0
+FILLER = "One moment."
+
+
+def _run_turn(session: CallSession, call_id: str, text: str, turns: int):
+    """Run one agent turn in a worker thread, yielding speech as it becomes available."""
+    q: queue.Queue = queue.Queue()
+    timing = {"started": time.time(), "first": None}
+
+    def work():
+        llm.use_model(VOICE_MODEL)
+        llm.start_tally("phone")
+        session.on_text = q.put
+        try:
+            session.reply(text[:1000])
+        except anthropic.APIError:
+            q.put("I'm sorry, I'm having trouble right now. If this is an emergency, please call 911.")
+        finally:
+            session.on_text = None
+            took = round(time.time() - timing["started"], 2)
+            first = round((timing["first"] or time.time()) - timing["started"], 2)
+            session.record.setdefault("latencies_s", []).append(took)
+            session.record.setdefault("first_words_s", []).append(first)
+            session.record["cost_usd"] = round(session.record.get("cost_usd", 0) + (llm.tally()["cost_usd"] or 0), 4)
+            # Content stays out of the logs; timing and cost are what we measure.
+            print(f"phone call={call_id} turn={turns + 1} model={llm.current_model()} first_words_s={first} "
+                  f"reply_seconds={took} events={[e['type'] for e in session.record['events']]} "
+                  f"cost=${session.record['cost_usd']}", flush=True)
+            q.put(None)
+
+    threading.Thread(target=work, daemon=True).start()
+    said_something = False
+    while True:
+        try:
+            piece = q.get(timeout=FILLER_AFTER_S if not said_something else 120)
+        except queue.Empty:
+            if said_something:
+                break
+            piece = FILLER
+            session.record.setdefault("fillers", 0)
+            session.record["fillers"] += 1
+        if piece is None:
+            break
+        if timing["first"] is None:
+            timing["first"] = time.time()
+        said_something = True
+        yield piece + " "
+
+
+def _sse(call_id: str, pieces):
+    base = {"id": f"chatcmpl-{call_id[:24]}", "object": "chat.completion.chunk",
+            "created": int(time.time()), "model": llm.MODEL}
+    first = True
+    for piece in pieces:
+        if not piece:
+            continue
+        delta = {"role": "assistant", "content": piece} if first else {"content": piece}
+        first = False
+        yield "data: " + json.dumps({**base, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]}) + "\n\n"
+    yield "data: " + json.dumps({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}) + "\n\n"
+    yield "data: [DONE]\n\n"
 
 
 @app.get("/api/phone/calls")

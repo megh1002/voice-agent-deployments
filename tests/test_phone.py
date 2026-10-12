@@ -57,7 +57,7 @@ def test_turns_on_the_same_call_share_one_session(monkeypatch):
     r2 = client.post("/vapi/chat/completions", json=vapi_body("call-abc", "Hi", "I want to cancel"), headers=AUTH)
     assert r1.status_code == r2.status_code == 200
     chunks = [json.loads(l[6:]) for l in r2.text.splitlines() if l.startswith("data: {")]
-    assert chunks[0]["choices"][0]["delta"]["content"] == "Sure, what's your date of birth?"
+    assert chunks[0]["choices"][0]["delta"]["content"].strip() == "Sure, what's your date of birth?"
     assert r2.text.rstrip().endswith("data: [DONE]")
     session = mod.PHONE_CALLS["call-abc"]
     assert [t["text"] for t in session.record["transcript"] if t["speaker"] == "caller"] == ["Hi", "I want to cancel"]
@@ -68,7 +68,7 @@ def test_non_streaming_response(monkeypatch):
     client, _ = client_with_secret(monkeypatch)
     monkeypatch.setattr(llm, "create", scripted("Hello there."))
     r = client.post("/vapi/chat/completions", json=vapi_body("c2", "Hi", stream=False), headers=AUTH)
-    assert r.json()["choices"][0]["message"]["content"] == "Hello there."
+    assert r.json()["choices"][0]["message"]["content"].strip() == "Hello there."
 
 
 def test_no_new_caller_words_means_no_model_call(monkeypatch):
@@ -104,3 +104,19 @@ def test_page_can_follow_a_voice_call(monkeypatch):
     client.post("/vapi/chat/completions", json=vapi_body("live-1", "Hi"), headers=AUTH)
     v = client.get("/api/voice/calls/live-1").json()
     assert v["found"] and v["transcript"][-1]["text"] == "How can I help?" and "Staff queues" in v["staff"]["tables"]
+
+
+def test_slow_turn_says_one_moment_first(monkeypatch):
+    import time as _time
+    client, mod = client_with_secret(monkeypatch)
+    monkeypatch.setattr(mod, "FILLER_AFTER_S", 0.2)
+    def slow(**kw):
+        _time.sleep(0.6)
+        return NS(stop_reason="end_turn", content=[NS(type="text", text="Here's your answer.")])
+    monkeypatch.setattr(llm, "create", slow)
+    r = client.post("/vapi/chat/completions", json=vapi_body("slow-1", "Hi"), headers=AUTH)
+    said = [json.loads(l[6:])["choices"][0]["delta"].get("content", "").strip()
+            for l in r.text.splitlines() if l.startswith("data: {")]
+    assert said[:2] == ["One moment.", "Here's your answer."]
+    rec = mod.PHONE_CALLS["slow-1"].record
+    assert rec["fillers"] == 1 and rec["first_words_s"][0] < rec["latencies_s"][0]

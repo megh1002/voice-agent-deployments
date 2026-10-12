@@ -75,3 +75,29 @@ changed. These become the case study and the interview stories.
   cover wrong streets, wrong numbers, and spoken variants ("north damen avenue").
 - **Lesson:** a loose matcher that looks fine in a demo is exactly where privacy
   bugs hide. Tests for the "should fail" cases matter as much as the happy path.
+
+## F6. The brain that passes the safety tests was too slow for a phone line (2026-10-12)
+
+- **What happened:** the first real voice call (Vapi web call) connected and played
+  the greeting, then failed on the first caller turn. Replaying that turn showed
+  the agent took **20 seconds** to answer. Vapi waits about 20 s for a reply to
+  start, then ends the call.
+- **Measured** (same three caller turns of the cancel scenario, per model):
+
+  | Model | Turn 1 | Turn 2 | Turn 3 (tool lookups) | Worst spike seen | Cost, 3 turns |
+  |---|---|---|---|---|---|
+  | Haiku 4.5 | 2.8 s | 2.7 s | 6.1 s | 41 s | $0.014 |
+  | Sonnet 5.5 | 2.4 s | 1.6 s | 3.8 s | none in this test | $0.017 |
+  | Opus 5.5 | 2.6 s | 2.2 s | 6.1 s | 20 s | $0.033 |
+
+  All three verified the caller correctly, read details back, and had no guardrail flags.
+- **What it means:** typical replies take a few seconds on every model, and turns that
+  use tools take about twice as long. The real killer is **tail latency**: random
+  spikes of 20-40 s that hit any model. Text-only evals never measure this.
+- **Fix (D28):** stream the agent's words to the voice platform as soon as they exist;
+  if nothing is ready after 4 s, say "One moment." like a person checking a screen;
+  log *time to first words* (what the caller feels) separately from total turn time;
+  and let voice calls use a faster model than evals (`VOICE_MODEL`).
+- **Lesson:** a voice agent has a latency budget the way it has a safety budget. The
+  question isn't only "is the answer right?" but "does a right answer arrive before
+  the caller, or the platform, gives up?"

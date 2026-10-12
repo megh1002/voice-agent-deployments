@@ -686,7 +686,14 @@ function wireVapi() {
     VPARTIAL?.remove(); VPARTIAL = null;
     VLOG.push({who, text: m.transcript}); bubble(who, m.transcript);
   });
-  VAPI.on("error", e => bubble("sys", "Voice error: " + (e?.error?.message || e?.message || "see the browser console")));
+  VAPI.on("error", e => { console.error("Vapi error", e); bubble("sys", "Voice error: " + describeVapiError(e)); });
+}
+
+function describeVapiError(e) {
+  const pick = o => o && (o.errorMsg || o.message || o.msg || o.reason || o.type);
+  const text = pick(e?.error?.error) || pick(e?.error) || pick(e);
+  if (text && typeof text === "string") return text;
+  try { return JSON.stringify(e).slice(0, 300); } catch { return "unknown error (see the browser console)"; }
 }
 
 async function pollVoice() {

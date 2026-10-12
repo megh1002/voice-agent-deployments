@@ -210,6 +210,16 @@ Four levels: **emergency** (page now) · **urgent** (first thing in the morning)
   never blur that, especially in healthcare.
 - Maple Court's agent stays unnamed, which shows the choice is per client.
 
+## D28. Voice calls: stream early, fill silence, faster model *(Claude's proposal from measurements, F6)*
+
+- **Chose:** stream speech the moment the agent produces it; after 4 s with
+  nothing ready, say "One moment."; log time-to-first-words per turn; voice calls
+  use `VOICE_MODEL` (recommended: Sonnet 5.5, the fastest typical turns in F6 at
+  half Opus's cost), while evals can keep the strongest model.
+- **Trade-off:** streamed words are spoken before the guardrail check on the full
+  reply runs, so on voice the guardrails flag after the fact (ties to D7: flag or block).
+- **Decision for Meghna:** which model voice calls use. Changing it is one Railway variable.
+
 ---
 
 ## Open
@@ -218,4 +228,4 @@ Four levels: **emergency** (page now) · **urgent** (first thing in the morning)
 - **D5.** Review the never-lists in both `playbook.yaml` files
 - **D6.** Success targets (draft: 0 missed emergencies; unnecessary pages as low as possible)
 - **D7.** Guardrails: flag bad replies (current) or block them before they're spoken?
-- **D13.** Speed vs. quality: which model and effort level for live calls (latency matters on the phone)
+- **D13.** Speed vs. quality: largely answered by F6/D28; the final voice-model choice is Meghna's
