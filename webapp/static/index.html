@@ -754,7 +754,7 @@ function bubble(speaker, text) {
   if (chat.querySelector(".empty")) chat.innerHTML = "";
   const d = document.createElement("div");
   d.className = "msg " + speaker;
-  d.innerHTML = speaker === "sys" ? esc(text) : `<span class="who">${speaker === "agent" ? "AI agent" : "Caller"}</span>${esc(text)}`;
+  d.innerHTML = speaker === "sys" ? esc(text) : `<span class="who">${speaker === "agent" ? (CUR?.agent_name ? `${esc(CUR.agent_name)} · AI` : "AI agent") : "Caller"}</span>${esc(text)}`;
   chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
   return d;
 }

@@ -12,9 +12,10 @@ timezone: America/Chicago
 workflows: [red_flags, identity, scheduling, handoff]
 
 # Played by code, word for word, so it can never be skipped (Illinois consent).
+agent_name: Ava                      # D27: a name, but always introduced as an AI
 disclosure: >-
-  Thanks for calling Ravenswood Family Medicine. I'm an AI assistant, and this
-  call is recorded. If this is a medical emergency, please hang up and call
+  Thanks for calling Ravenswood Family Medicine. I'm Ava, an AI assistant, and
+  this call is recorded. If this is a medical emergency, please hang up and call
   911. How can I help you today?
 
 office_hours: "Monday to Friday, 8am to 5pm"

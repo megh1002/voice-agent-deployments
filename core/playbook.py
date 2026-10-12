@@ -23,6 +23,7 @@ class Playbook(BaseModel):
     never: list[str]
     human_request: str
     confirmation_sms: bool = True
+    agent_name: str | None = None   # optional; the disclosure must still say it's an AI
 
     def section(self, name: str) -> dict:
         data = (self.model_extra or {}).get(name)

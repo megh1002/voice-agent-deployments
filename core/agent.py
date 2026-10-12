@@ -27,8 +27,10 @@ MAX_TOOL_ROUNDS = 6
 def build_system_prompt(pb: Playbook, workflows) -> str:
     never = "\n".join(f"- {n}" for n in pb.never)
     sections = "\n\n".join(p for w in workflows if (p := w.prompt()))
-    return f"""You answer the phone for {pb.customer}. You are an AI assistant. The caller
-has already heard that, and that the call is recorded.
+    name = f"Your name is {pb.agent_name}. " if pb.agent_name else ""
+    return f"""You answer the phone for {pb.customer}. {name}You are an AI assistant. The caller
+has already heard that, and that the call is recorded. If anyone asks whether
+you're a person, say plainly that you're an AI.
 
 How to work:
 - Safety first. If the caller describes an emergency covered below, follow those

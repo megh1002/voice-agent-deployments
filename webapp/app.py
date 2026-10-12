@@ -186,6 +186,7 @@ def customer(cid: str):
         "sample_callers": [{"phone": p, "label": l} for p, l in c.SAMPLE_CALLERS],
         "demo_calls": getattr(c, "DEMO_CALLS", []),
         "disclosure": pb.disclosure,
+        "agent_name": pb.agent_name,
     }
 
 
