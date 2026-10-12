@@ -386,8 +386,12 @@ def vapi_turn(body: dict = Body(...), authorization: str | None = Header(None),
     if not _phone_authorized(secret, authorization, x_api_key):
         raise HTTPException(401, "Unauthorized")
 
-    call = body.get("call") or {}
-    call_id = re.sub(r"[^A-Za-z0-9_-]", "", str(call.get("id") or "unknown"))[:40] or "unknown"
+    call = body.get("call") or (body.get("metadata") or {}).get("call") or {}
+    call_id = re.sub(r"[^A-Za-z0-9_-]", "", str(call.get("id") or ""))[:40]
+    if not call_id:
+        # Without a call id every call would share one session. Log only field names, never content.
+        print(f"phone request without a call id; top-level fields={sorted(body)}", flush=True)
+        call_id = "unknown"
     caller = str((call.get("customer") or {}).get("number") or "unknown")[:20]
     session = PHONE_CALLS.get(call_id)
     if session is None:
