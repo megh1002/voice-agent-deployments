@@ -201,9 +201,9 @@ Four levels: **emergency** (page now) · **urgent** (first thing in the morning)
   network per day, and 20 turns per call. Visitor IDs are easy to reset, which is
   why the per-network limit exists.
 
-## D27. The clinic agent is called Ava (Meghna)
+## D27. The clinic agent is called Emma (Meghna)
 
-- **Chose:** the clinic's agent introduces itself as "Ava, an AI assistant."
+- **Chose:** the clinic's agent introduces itself as "Emma, an AI assistant" (first named Ava, renamed to match the Vapi voice "Emma").
   Set in the playbook (`agent_name`), so each customer can choose.
 - **Guardrail kept:** the greeting always says it's an AI, and if asked whether
   it's a person, it says plainly that it's an AI. A human-sounding name must
