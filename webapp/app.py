@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -377,13 +377,33 @@ def _phone_authorized(secret: str, authorization: str | None, x_api_key: str | N
     return any(o and hmac.compare_digest(o, secret) for o in offered)
 
 
+# Recent voice-platform requests, for diagnosing setup problems from outside.
+# Only yes/no facts and timings are kept: never call content, never credentials.
+PHONE_REQUESTS: "deque[dict]" = deque(maxlen=20)
+
+
+def _note_request(**facts):
+    PHONE_REQUESTS.append({"at": datetime.now().isoformat(timespec="seconds"), **facts})
+
+
+@app.get("/api/phone/health")
+def phone_health():
+    return {"configured": bool(os.environ.get("VAPI_SECRET")), "voice_model": VOICE_MODEL or llm.MODEL,
+            "recent_requests": list(PHONE_REQUESTS)}
+
+
+# Some setups append /chat/completions to a URL that already ends with it; accept both.
+@app.post("/vapi/chat/completions/chat/completions", include_in_schema=False)
 @app.post("/vapi/chat/completions")
-def vapi_turn(body: dict = Body(...), authorization: str | None = Header(None),
+def vapi_turn(request: Request, body: dict = Body(...), authorization: str | None = Header(None),
               x_api_key: str | None = Header(None)):
     secret = os.environ.get("VAPI_SECRET")
     if not secret:
+        _note_request(path=request.url.path, result="not configured")
         raise HTTPException(503, "Phone calls are not configured.")
     if not _phone_authorized(secret, authorization, x_api_key):
+        _note_request(path=request.url.path, result="rejected: secret did not match",
+                      auth_header_present=bool(authorization or x_api_key))
         raise HTTPException(401, "Unauthorized")
 
     call = body.get("call") or (body.get("metadata") or {}).get("call") or {}
@@ -403,6 +423,9 @@ def vapi_turn(body: dict = Body(...), authorization: str | None = Header(None),
 
     text = _latest_caller_text(body.get("messages"))
     turns = sum(1 for x in session.record["transcript"] if x["speaker"] == "caller")
+    _note_request(path=request.url.path, result="accepted", has_call_id=call_id != "unknown",
+                  call_id_tail=call_id[-6:], has_caller_words=bool(text), stream=body.get("stream", True),
+                  fields=sorted(body))
     if not text:
         canned = ""
     elif session.ended:
@@ -441,7 +464,8 @@ def _run_turn(session: CallSession, call_id: str, text: str, turns: int):
         session.on_text = q.put
         try:
             session.reply(text[:1000])
-        except anthropic.APIError:
+        except Exception as e:  # never leave the caller in silence
+            _note_request(path="(turn)", result=f"turn failed: {type(e).__name__}", call_id_tail=call_id[-6:])
             q.put("I'm sorry, I'm having trouble right now. If this is an emergency, please call 911.")
         finally:
             session.on_text = None
