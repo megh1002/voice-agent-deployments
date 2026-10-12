@@ -49,7 +49,10 @@ MAX_CALLS_PER_NETWORK_PER_DAY = 20  # visitor ids are easy to reset; IP addresse
 MAX_SANDBOXES = 300
 SANDBOX_IDLE_SECONDS = 2 * 60 * 60
 
-app = FastAPI(title="Voice agent deployments")
+# The auto-generated API reference holds no secrets, but a public demo doesn't need it.
+app = FastAPI(title="Voice agent deployments",
+              docs_url=None if PUBLIC else "/docs", redoc_url=None,
+              openapi_url=None if PUBLIC else "/openapi.json")
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 
 
