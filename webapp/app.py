@@ -369,11 +369,12 @@ def _latest_caller_text(messages: list[dict]) -> str:
 def _phone_authorized(secret: str, authorization: str | None, x_api_key: str | None) -> bool:
     """Accept the secret however the platform's credential type sends it:
     'Authorization: Bearer <s>', 'Authorization: <s>', or 'X-Api-Key: <s>'."""
-    offered = [x_api_key or ""]
+    secret = secret.strip().strip('"').strip("'").strip()  # tolerate stray spaces or quotes
+    offered = [(x_api_key or "").strip()]
     token = (authorization or "").strip()
     while token.lower().startswith("bearer "):
         token = token[7:].strip()
-    offered.append(token)
+    offered.append(token.strip('"').strip("'"))
     return any(o and hmac.compare_digest(o, secret) for o in offered)
 
 

@@ -120,3 +120,10 @@ def test_slow_turn_says_one_moment_first(monkeypatch):
     assert said[:2] == ["One moment.", "Here's your answer."]
     rec = mod.PHONE_CALLS["slow-1"].record
     assert rec["fillers"] == 1 and rec["first_words_s"][0] < rec["latencies_s"][0]
+
+
+def test_secret_with_stray_spaces_or_quotes_still_matches(monkeypatch):
+    client, _ = client_with_secret(monkeypatch, secret='  "phone-secret"\n')
+    monkeypatch.setattr(llm, "create", scripted("ok"))
+    r = client.post("/vapi/chat/completions", json=vapi_body("ws1", "hi"), headers={"Authorization": "Bearer phone-secret"})
+    assert r.status_code == 200
