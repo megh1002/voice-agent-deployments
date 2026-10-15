@@ -8,7 +8,12 @@ a record it wasn't verified for.
 
 Caller ID is deliberately NOT used: families share phones.
 
-Adapter methods needed: find_patient(full_name, birth_date) -> list[PatientRecord]
+Speech-to-text mishears names ("Gonzales" for Gonzalez, "Tamen" for Damen), and
+making callers spell them is slow and still fails. So names and street names
+match if they sound alike, but only when the birth date and the phone number
+(or house number) match exactly. The exact identifiers carry the security (D29).
+
+Adapter methods needed: find_patients_born_on(birth_date) -> list[PatientRecord]
 """
 
 import re
@@ -22,7 +27,7 @@ class IdentityRules(BaseModel):
     max_attempts: int = 2
     caregivers: str = "on_file_only"  # caregivers must be listed as authorized
     phone_first: bool = True   # digits survive speech-to-text better than street names
-    read_back: bool = True     # confirm details (spelling names) before checking them
+    sounds_alike: bool = True  # names and street names may match by sound (D29)
 
 
 def _digits(s: str) -> str:
@@ -39,14 +44,50 @@ def _words(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
-def _third_identifier_matches(said: str, p) -> bool:
+SOUND_GROUPS = {"bfpv": "1", "cgjkqsxz": "2", "dt": "3", "l": "4", "mn": "5", "r": "6"}
+SOUND = {ch: code for letters, code in SOUND_GROUPS.items() for ch in letters}
+
+
+def _sound(word: str) -> str:
+    """A sounds-alike key, Soundex-style but coding the first letter too, so D/T and
+    S/Z land together: Gonzalez = Gonzales, Damen = Tamen. Vowels are dropped."""
+    key = ""
+    for ch in word.lower():
+        code = SOUND.get(ch, "")
+        if code and not key.endswith(code):
+            key += code
+    return key
+
+
+def _same_word(said: str, record: str, sounds_alike: bool) -> bool:
+    if said.lower() == record.lower():
+        return True
+    return sounds_alike and bool(_sound(record)) and _sound(said) == _sound(record)
+
+
+def _name_matches(said: str, p, sounds_alike: bool) -> bool:
+    """First and last name, each exactly or (if allowed) by sound."""
+    heard, record = _words(said), _words(p.name)
+    if len(heard) < 2:
+        return False
+    return (_same_word(heard[0], record[0], sounds_alike)
+            and _same_word(heard[-1], record[-1], sounds_alike))
+
+
+def _third_identifier_matches(said: str, p, sounds_alike: bool = False) -> bool:
     """Phone on file (all 10 digits) or street address (house number AND street name).
     Directions and suffixes like "N" or "Ave" never count as a match on their own."""
     if len(_digits(said)) >= 7:
         return _digits(said) == _digits(p.phone)
     record, heard = _words(p.address_line), _words(said)
     number, street = record[0], [w for w in record[1:] if w not in NOT_STREET_NAME]
-    return number in heard and bool(street) and all(w in heard for w in street)
+    return number in heard and bool(street) and all(
+        any(_same_word(h, w, sounds_alike) for h in heard if h not in NOT_STREET_NAME) for w in street)
+
+
+# The agent saying details "match" before the check ran (seen on the first live call).
+IDENTITY_CLAIM = re.compile(r"\b(that matches|matches (what|our)|you'?re (now )?verified|"
+                            r"(i'?ve|i have) verified|identity (is )?(confirmed|verified))\b", re.I)
 
 
 class Identity(Workflow):
@@ -59,18 +100,22 @@ class Identity(Workflow):
     def prompt(self):
         third = ("the phone number on file. If they don't know it, ask for their street address instead"
                  if self.rules.phone_first else "either the phone number on file or their street address")
-        read_back = ("""
-Before calling verify_identity, read the details back and ask the caller to
-confirm, spelling any street or last name letter by letter (for example: "That's
-Damen, D-A-M-E-N?"). Speech recognition often mishears names, and a wrong letter
-would fail a correct caller. Only read back what the caller told you.""" if self.rules.read_back else "")
+        spelling = ("""
+Don't ask callers to spell names or streets, and don't read details back before
+checking: the check already allows for names that sound alike. Call
+verify_identity as soon as you have all three details.""" if self.rules.sounds_alike else "")
         return f"""## Verifying identity
 Before discussing or changing anything about a patient (appointments included),
 verify identity with verify_identity: full name, date of birth, and {third}.
 Ask for these naturally, a couple at a time. If someone calls for another person
 (a parent for a child, an adult child for a parent), collect the patient's
-details and the caller's own name.{read_back}
-Never hint at whether a name or birth date matched. After {self.rules.max_attempts} failed
+details and the caller's own name.{spelling}
+If the caller pauses partway through a number, don't comment on the partial
+number; just say "Mm-hm" and let them finish.
+Never say the details match, or that the caller is verified, until verify_identity
+says so. If it fails, don't guess which detail was wrong and never hint at whether
+a name or birth date matched; ask them to repeat the details, or offer the street
+address instead of the phone number. After {self.rules.max_attempts} failed
 attempts, stop trying and offer a callback from the front desk instead.
 You don't need to verify someone to give general information (hours, location)
 or to follow red flag instructions."""
@@ -98,16 +143,22 @@ or to follow red flag instructions."""
                     "tell_caller": "Too many attempts. Offer a callback from the front desk."}
         call.state["identity_attempts"] = attempts + 1
 
-        matches = [p for p in call.adapter.find_patient(args["full_name"], args["date_of_birth"])
-                   if _third_identifier_matches(args["phone_or_address"], p)]
+        loose = self.rules.sounds_alike
+        born = call.adapter.find_patients_born_on(args["date_of_birth"])
+        exact = [p for p in born if _name_matches(args["full_name"], p, False)
+                 and _third_identifier_matches(args["phone_or_address"], p, False)]
+        # Exact matches win; sounds-alike only when nothing matches exactly.
+        matches = exact or [p for p in born if _name_matches(args["full_name"], p, loose)
+                            and _third_identifier_matches(args["phone_or_address"], p, loose)]
         caregiver = args["caller_is"] == "caregiver"
         if matches and caregiver:
             who = args["caregiver_name"].strip().lower()
             matches = [p for p in matches if who and any(who == x.lower() for x in p.proxies)]
 
         ok = len(matches) == 1
-        call.event(type="identity", verified=ok, attempt=attempts + 1,
-                   as_caregiver=caregiver, patient_id=matches[0].id if ok else None)
+        call.event(type="identity", verified=ok, attempt=attempts + 1, as_caregiver=caregiver,
+                   patient_id=matches[0].id if ok else None,
+                   matched_by=("exact" if exact else "sounds_alike") if ok else None)
         if ok:
             call.state["patient"] = matches[0]
             return {"verified": True, "patient_first_name": matches[0].name.split()[0]}
@@ -117,3 +168,8 @@ or to follow red flag instructions."""
         else:
             hint = "Ask them to double-check the details." if left else "Offer a front desk callback."
         return {"verified": False, "attempts_left": left, "tell_caller": hint}
+
+    def check_reply(self, reply, call):
+        if IDENTITY_CLAIM.search(reply) and "patient" not in call.state:
+            return [{"rule": "claimed_verified_without_check", "text": reply}]
+        return []

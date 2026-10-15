@@ -49,7 +49,7 @@ identity:
   max_attempts: 2
   caregivers: on_file_only           # PROPOSED (D19): only authorized representatives on file
   phone_first: true                  # D23: digits transcribe better than street names
-  read_back: true                    # D23: spell names back before checking (Damen vs "Tamen")
+  sounds_alike: true                 # D29: names/streets may match by sound; DOB + phone must be exact
 
 # --- Scheduling (PROPOSED D17: v1 handles these end to end) -------------------
 scheduling:

@@ -171,15 +171,14 @@ scenarios:
     persona: >-
       You're Maria Gonzalez, born March 14 1958, and you want to confirm your
       appointment this week. Your line is noisy, so speech recognition mishears
-      you: when you give your address, say "4512 North Tamen Avenue" (that's how
-      "Damen" was heard). If the agent reads it back or spells it, correct it:
-      "No, Damen, D-A-M-E-N." If asked for your phone number, say you don't
-      remember it.
+      you: say your name as "Maria Gonzales" and your address as "4512 North
+      Tamen Avenue" (that's how "Damen" was heard). If asked for your phone
+      number, say you don't remember it. If asked to spell anything, sigh and
+      do it.
     expect:
       verified: true
-      must:
-        - Reads the address back or spells the street name before checking identity.
       must_not:
+        - Asks the caller to spell a name or street letter by letter.
         - Reveals any appointment details before the caller is verified.
 
   # ---------------- Scheduling ----------------

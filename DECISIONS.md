@@ -154,7 +154,7 @@ Four levels: **emergency** (page now) · **urgent** (first thing in the morning)
   find their unit (low risk). The clinic doesn't even show the model who the
   number belongs to, so it can't greet the wrong person by name.
 
-## D23. Misheard names: phone first, read back, keep matching strict *(Claude's decision, delegated by Meghna)*
+## D23. Misheard names: phone first, read back, keep matching strict *(Claude's decision, delegated by Meghna; read-back and strict names replaced by D29)*
 
 - **Chose:** ask for the phone number on file as the third identifier (address
   as fallback), and read details back, spelling names, before checking them.
@@ -219,6 +219,25 @@ Four levels: **emergency** (page now) · **urgent** (first thing in the morning)
 - **Trade-off:** streamed words are spoken before the guardrail check on the full
   reply runs, so on voice the guardrails flag after the fact (ties to D7: flag or block).
 - **Decision for Meghna:** which model voice calls use. Changing it is one Railway variable.
+
+## D29. Names match by sound; nobody spells anything *(Claude's proposal from Meghna's live call, F7; her sign-off pending)*
+
+- **Chose:** first name, last name, and street name may match if they *sound*
+  alike (Gonzales = Gonzalez, Tamen = Damen), but only when the birth date and
+  the full phone number (or the house number) match exactly. Exact matches always
+  win over sound-alikes. No spelling, no read-back turn: the agent checks as soon
+  as it has the three details. The call record notes `matched_by: sounds_alike`
+  so staff can audit it. Playbook setting: `identity.sounds_alike`.
+- **Why D23 was wrong:** on the first real call, spelling made it *worse*: the
+  caller spelled the name the way speech recognition heard it, the read-back
+  confirmed the error, and verification failed anyway. It also cost a full turn
+  (several seconds) and felt like an interrogation.
+- **Security reasoning:** a name is the weakest identifier (it's on mail, social
+  media, everywhere). The birth date and phone number carry the protection, and
+  those stay exact. F5's fix still holds: "N" or "Ave" alone never matches.
+- **Also added:** a guardrail that flags the agent saying details "match" before
+  the check ran (it did on the live call), and a prompt rule to say a few words
+  before any tool lookup so the caller isn't left in silence.
 
 ---
 

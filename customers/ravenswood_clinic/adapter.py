@@ -51,12 +51,10 @@ class RavenswoodAdapter:
 
     # ---- identity ---------------------------------------------------------------
 
-    def find_patient(self, full_name: str, birth_date: str) -> list[PatientRecord]:
-        parts = full_name.strip().split()
-        if len(parts) < 2:
-            return []
+    def find_patients_born_on(self, birth_date: str) -> list[PatientRecord]:
+        """Everyone born that day. The identity workflow decides who, if anyone, matches."""
         out = []
-        for p in self._search("Patient", given=parts[0], family=parts[-1], birthdate=birth_date):
+        for p in self._search("Patient", birthdate=birth_date):
             proxies = [f"{r['name'][0]['given'][0]} {r['name'][0]['family']}"
                        for r in self._search("RelatedPerson", patient=f"Patient/{p['id']}")]
             n = p["name"][0]

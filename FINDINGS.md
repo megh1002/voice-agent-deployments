@@ -101,3 +101,32 @@ changed. These become the case study and the interview stories.
 - **Lesson:** a voice agent has a latency budget the way it has a safety budget. The
   question isn't only "is the answer right?" but "does a right answer arrive before
   the caller, or the platform, gives up?"
+
+## F7. The first real conversation: spelling didn't help, and silence felt broken (2026-10-15)
+
+- **What happened:** Meghna's first full Vapi call reached identity verification
+  and failed for the right patient. Four problems, all invisible in text evals:
+  1. **Spelling made it worse.** Speech recognition heard "Gonzales" (the record
+     says Gonzalez). Emma asked her to spell it; she spelled what she'd been heard
+     as, Emma read it back, and the check failed anyway. D23's read-back
+     confirmed the mistake instead of catching it.
+  2. **Emma claimed a match before checking.** "That matches what I have" was
+     said before `verify_identity` ever ran, and when the check failed she blamed
+     the phone number, which was actually correct.
+  3. **Long silence.** The verification turn needed two model calls (decide to
+     check, then speak the result), with nothing said in between: about 10 s of
+     dead air on the line.
+  4. **Phone numbers got chopped up.** She paused between digit groups, and the
+     voice platform treated each pause as the end of her turn ("773-5" … "5" …
+     "0101"), so Emma replied to fragments.
+- **Fixes:** names and streets match by sound when birth date and phone match
+  exactly, no spelling (D29); a guardrail for claiming a match before the check;
+  the agent says a few words before any lookup; a prompt rule for partial numbers;
+  and on the Vapi side, a longer wait after the caller says a number.
+- **Measured after the fix** (same three caller turns, Sonnet 5.5): first words in
+  2.6 s, 2.3 s, and 2.0 s; the verifying turn speaks at 2.0 s and finishes at 6.0 s.
+  Verified via `sounds_alike`, no guardrail flags, $0.017.
+- **Lesson:** a rule that looks safe on paper (make them spell it) can fail the
+  real caller *and* add nothing to security. Put the security in the identifiers
+  speech recognition gets right (digits, dates), and be forgiving on the ones it
+  gets wrong (names).

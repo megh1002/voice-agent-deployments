@@ -146,16 +146,35 @@ def test_identity_prompt_follows_the_playbook(outbox):
     c = call(outbox)
     ident = next(w for w in c.workflows if w.name == "identity")
     assert "phone number on file. If they don't know it" in c.system
-    assert "D-A-M-E-N" in c.system
-    ident.rules.read_back = False
-    assert "D-A-M-E-N" not in ident.prompt()
+    assert "Don't ask callers to spell" in c.system
+    ident.rules.sounds_alike = False
+    assert "Don't ask callers to spell" not in ident.prompt()
 
 
-def test_misheard_address_fails_until_corrected(outbox):
+def test_misheard_names_and_streets_still_verify(outbox):
+    # What speech-to-text actually produced on calls: "Gonzales", "Tamen".
+    assert use_tool(call(outbox), "verify_identity", **{**MARIA, "full_name": "Maria Gonzales"})["verified"]
+    assert use_tool(call(outbox), "verify_identity", **{**MARIA, "phone_or_address": "4512 N Tamen Ave"})["verified"]
     c = call(outbox)
-    misheard = {**MARIA, "phone_or_address": "4512 N Tamen Ave"}
-    assert not use_tool(c, "verify_identity", **misheard)["verified"]   # why read-back matters
-    assert use_tool(c, "verify_identity", **MARIA)["verified"]           # corrected, second attempt
+    use_tool(c, "verify_identity", **{**MARIA, "full_name": "Maria Gonzales", "phone_or_address": "773-555-0101"})
+    assert c.events("identity")[-1]["matched_by"] == "sounds_alike"
+
+
+def test_sounds_alike_never_loosens_birth_date_or_phone(outbox):
+    for wrong in ({"date_of_birth": "1958-03-15"}, {"phone_or_address": "773-555-0102"},
+                  {"full_name": "Rosa Gonzalez"}, {"full_name": "Maria Lopez"}):
+        assert not use_tool(call(outbox), "verify_identity", **{**MARIA, **wrong})["verified"], wrong
+    c = call(outbox)
+    c.workflows[[w.name for w in c.workflows].index("identity")].rules.sounds_alike = False
+    assert not use_tool(c, "verify_identity", **{**MARIA, "full_name": "Maria Gonzales"})["verified"]
+
+
+def test_saying_details_match_before_the_check_is_flagged(outbox):
+    c = call(outbox)
+    flags = check_reply("Thank you, Maria. That matches what I have.", c)
+    assert flags[0]["rule"] == "claimed_verified_without_check"
+    use_tool(c, "verify_identity", **MARIA)
+    assert check_reply("Thanks, that matches what I have.", c) == []
 
 
 def test_address_needs_the_actual_street_name(outbox):
