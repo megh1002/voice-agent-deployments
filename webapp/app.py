@@ -12,6 +12,7 @@ Two modes:
                      cap, calls per visitor and per network, turns per call.
 """
 
+import hashlib
 import hmac
 import json
 import os
@@ -393,6 +394,25 @@ def phone_health():
             "recent_requests": list(PHONE_REQUESTS)}
 
 
+def _fingerprint(value: str) -> dict:
+    """Safe to show: a length, a character class, and 8 hex chars of a SHA-256 hash.
+    Enough to tell 'different key' from 'same key with an extra character'."""
+    kind = ("hex" if re.fullmatch(r"[0-9a-f]+", value) else
+            "uuid" if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value) else "other")
+    return {"length": len(value), "kind": kind, "sha8": hashlib.sha256(value.encode()).hexdigest()[:8]}
+
+
+def _secret_fingerprints(secret: str, authorization: str | None, x_api_key: str | None) -> dict:
+    expected = secret.strip().strip('"').strip("'").strip()
+    received = (authorization or x_api_key or "").strip()
+    scheme = received.split(" ", 1)[0] if " " in received else "(none)"
+    while received.lower().startswith("bearer "):
+        received = received[7:].strip()
+    return {"expected": _fingerprint(expected), "received": _fingerprint(received),
+            "received_scheme": scheme if scheme.lower() == "bearer" else "(none or other)",
+            "received_header": "authorization" if authorization else "x-api-key" if x_api_key else None}
+
+
 # Some setups append /chat/completions to a URL that already ends with it; accept both.
 @app.post("/vapi/chat/completions/chat/completions", include_in_schema=False)
 @app.post("/vapi/chat/completions")
@@ -404,7 +424,8 @@ def vapi_turn(request: Request, body: dict = Body(...), authorization: str | Non
         raise HTTPException(503, "Phone calls are not configured.")
     if not _phone_authorized(secret, authorization, x_api_key):
         _note_request(path=request.url.path, result="rejected: secret did not match",
-                      auth_header_present=bool(authorization or x_api_key))
+                      auth_header_present=bool(authorization or x_api_key),
+                      **_secret_fingerprints(secret, authorization, x_api_key))
         raise HTTPException(401, "Unauthorized")
 
     call = body.get("call") or (body.get("metadata") or {}).get("call") or {}

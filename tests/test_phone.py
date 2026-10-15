@@ -127,3 +127,11 @@ def test_secret_with_stray_spaces_or_quotes_still_matches(monkeypatch):
     monkeypatch.setattr(llm, "create", scripted("ok"))
     r = client.post("/vapi/chat/completions", json=vapi_body("ws1", "hi"), headers={"Authorization": "Bearer phone-secret"})
     assert r.status_code == 200
+
+
+def test_rejection_records_safe_fingerprints(monkeypatch):
+    client, mod = client_with_secret(monkeypatch, secret="abc123")
+    client.post("/vapi/chat/completions", json=vapi_body("fp1", "hi"), headers={"Authorization": "Bearer abc1234"})
+    note = client.get("/api/phone/health").json()["recent_requests"][-1]
+    assert note["expected"]["length"] == 6 and note["received"]["length"] == 7
+    assert "abc123" not in json.dumps(note)
